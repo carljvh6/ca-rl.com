@@ -1,0 +1,11 @@
+# FastHTML and ASGI server
+python-fasthtml>=0.4.0
+uvicorn[standard]>=0.24.0
+
+# GCP libraries for Secret Manager (for future use)
+google-cloud-secret-manager>=2.18.0
+
+# Configuration and utilities
+pyyaml>=6.0.1
+
+
