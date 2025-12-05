@@ -43,7 +43,7 @@ jobs:
         run: |
           gcloud builds submit \
             --config=infrastructure/build_dev.yaml \
-            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }},ENV=dev \
+            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
             --project=${{ secrets.GCP_PROJECT_ID_DEV }}
       
       - name: Build and push Docker image (Prod)
@@ -51,7 +51,7 @@ jobs:
         run: |
           gcloud builds submit \
             --config=infrastructure/build_prod.yaml \
-            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }},ENV=prod \
+            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
             --project=${{ secrets.GCP_PROJECT_ID_PROD }}
   
   deploy-dev:
