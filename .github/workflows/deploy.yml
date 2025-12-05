@@ -41,18 +41,60 @@ jobs:
       - name: Build and push Docker image (Dev)
         if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
         run: |
-          gcloud builds submit \
+          BUILD_ID=$(gcloud builds submit \
             --config=infrastructure/build_dev.yaml \
             --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
-            --project=${{ secrets.GCP_PROJECT_ID_DEV }}
+            --project=${{ secrets.GCP_PROJECT_ID_DEV }} \
+            --async \
+            --format="value(id)")
+          
+          echo "Build submitted with ID: $BUILD_ID"
+          
+          # Wait for build to complete
+          gcloud builds wait $BUILD_ID \
+            --project=${{ secrets.GCP_PROJECT_ID_DEV }} \
+            --timeout=900
+          
+          # Check build status
+          STATUS=$(gcloud builds describe $BUILD_ID \
+            --project=${{ secrets.GCP_PROJECT_ID_DEV }} \
+            --format="value(status)")
+          
+          if [ "$STATUS" != "SUCCESS" ]; then
+            echo "Build failed with status: $STATUS"
+            exit 1
+          fi
+          
+          echo "Build completed successfully"
       
       - name: Build and push Docker image (Prod)
         if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
         run: |
-          gcloud builds submit \
+          BUILD_ID=$(gcloud builds submit \
             --config=infrastructure/build_prod.yaml \
             --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
-            --project=${{ secrets.GCP_PROJECT_ID_PROD }}
+            --project=${{ secrets.GCP_PROJECT_ID_PROD }} \
+            --async \
+            --format="value(id)")
+          
+          echo "Build submitted with ID: $BUILD_ID"
+          
+          # Wait for build to complete
+          gcloud builds wait $BUILD_ID \
+            --project=${{ secrets.GCP_PROJECT_ID_PROD }} \
+            --timeout=900
+          
+          # Check build status
+          STATUS=$(gcloud builds describe $BUILD_ID \
+            --project=${{ secrets.GCP_PROJECT_ID_PROD }} \
+            --format="value(status)")
+          
+          if [ "$STATUS" != "SUCCESS" ]; then
+            echo "Build failed with status: $STATUS"
+            exit 1
+          fi
+          
+          echo "Build completed successfully"
   
   deploy-dev:
     needs: build
