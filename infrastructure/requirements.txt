@@ -5,7 +5,12 @@ uvicorn[standard]>=0.24.0
 # GCP libraries for Secret Manager (for future use)
 google-cloud-secret-manager>=2.18.0
 
+# Google Generative AI (Gemini API)
+google-genai>=0.2.0
+
 # Configuration and utilities
 pyyaml>=6.0.1
+python-dotenv>=1.0.0
 
-
+# Ipykernel only for testing in jupypter notebook
+ipykernel>=6.26.0
