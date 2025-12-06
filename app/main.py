@@ -77,22 +77,28 @@ def get_api_key(use_secret_manager=None):
             
             if project_id:
                 secret_name = "GOOGLE_API_KEY"  # Secret name in Secret Manager
-                client = secretmanager.SecretManagerServiceClient()
-                name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-                print(f"Attempting to fetch secret: {name}")
-                response = client.access_secret_version(request={"name": name})
-                api_key = response.payload.data.decode("UTF-8")
-                if api_key:
-                    print("Successfully retrieved API key from Secret Manager")
-                    return api_key
+                try:
+                    client = secretmanager.SecretManagerServiceClient()
+                    name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+                    print(f"Attempting to fetch secret: {name}")
+                    response = client.access_secret_version(request={"name": name})
+                    api_key = response.payload.data.decode("UTF-8")
+                    if api_key:
+                        print("Successfully retrieved API key from Secret Manager")
+                        return api_key
+                except Exception as sm_error:
+                    # Log but don't crash - fall through to .env file
+                    print(f"Warning: Secret Manager access failed: {str(sm_error)}")
+                    print(f"This is OK if secret doesn't exist or service account lacks permissions")
             else:
                 print(f"Warning: Project ID not found. Available env vars: K_SERVICE={os.getenv('K_SERVICE')}, GOOGLE_CLOUD_PROJECT={os.getenv('GOOGLE_CLOUD_PROJECT')}")
         except Exception as e:
-            # If Secret Manager fails, log detailed error
+            # If Secret Manager fails, log detailed error but don't crash
             import traceback
             error_details = traceback.format_exc()
-            print(f"Error fetching from Secret Manager: {str(e)}")
+            print(f"Warning: Error fetching from Secret Manager: {str(e)}")
             print(f"Traceback: {error_details}")
+            print("Falling back to .env file or environment variables")
     
     # Fall back to .env file for local development
     load_dotenv()
@@ -100,7 +106,11 @@ def get_api_key(use_secret_manager=None):
     if api_key:
         return api_key
     
-    raise ValueError("GOOGLE_API_KEY not found in Secret Manager, environment variables, or .env file.")
+    # Don't raise error during app startup - return None and let route handlers handle it
+    # This prevents app from crashing if API key is missing
+    print("Warning: GOOGLE_API_KEY not found in Secret Manager, environment variables, or .env file.")
+    print("The app will start but API-dependent routes will fail.")
+    return None
 
 def layout(content):
     sidebar = Div(
@@ -118,8 +128,10 @@ def layout(content):
     main_content = Div(content, cls='flex-1 p-8')
     return Div(sidebar, main_content, cls='flex')
 
-app, rt = fast_app(title="carldotcom's playground", hdrs = daisy_headers
-    )
+app, rt = fast_app(title="carldotcom's playground", hdrs = daisy_headers)
+
+# Ensure app is available for uvicorn/ASGI
+__all__ = ['app']
 
 @rt
 def btn_res(nm:str): return f"Button Clicked, hello {nm}!"
@@ -128,6 +140,8 @@ def btn_res(nm:str): return f"Button Clicked, hello {nm}!"
 def chatbot_res(message:str): 
     try:
         api_key = get_api_key(use_secret_manager=True)
+        if not api_key:
+            return "Error: API key not configured. Please set GOOGLE_API_KEY environment variable."
         client = genai.Client(api_key=api_key)
 
         response = client.models.generate_content(
@@ -149,6 +163,8 @@ def f1_mcp_res(query: str):
             return "<p>Please enter a question.</p>"
         
         api_key = get_api_key(use_secret_manager=True)
+        if not api_key:
+            return "<p>Error: API key not configured. Please set GOOGLE_API_KEY environment variable.</p>"
         client = genai.Client(api_key=api_key)
         
         # Ask Gemini to determine which tool to use
