@@ -227,8 +227,21 @@ For plot requests, look for driver names or codes in the query."""
                 return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
             result = plot_driver_lap_times(year, race, driver_code.upper())
             if "plot_html" in result:
-                # Return HTML directly - FastHTML will render it
-                return result["plot_html"]
+                # Return HTML with plot and table
+                plot_html = result["plot_html"]
+                
+                # Create table HTML from lap data
+                if "lap_data" in result and result["lap_data"]:
+                    table_html = "<div class='mt-8'><h3 class='text-2xl mb-4'>Lap Times</h3><table class='table table-zebra w-full'><thead><tr><th>Lap</th><th>Lap Time</th><th>Compound</th></tr></thead><tbody>"
+                    for lap in result["lap_data"]:
+                        lap_num = lap.get('LapNumber', '')
+                        lap_time = lap.get('LapTime', '')
+                        compound = lap.get('Compound', '')
+                        table_html += f"<tr><td>{lap_num}</td><td>{lap_time}</td><td>{compound}</td></tr>"
+                    table_html += "</tbody></table></div>"
+                    return plot_html + table_html
+                else:
+                    return plot_html
             else:
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
         else:
