@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# FastHTML session files
+*.sesskey
+.sesskey
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Secrets and credentials
+*.json
+!package.json
+deploy_key.json
+service_acc_key.json
+.env
+.env.local
+config.yaml  # If it contains secrets
+
+# GCP
+.gcloud/
+service-account-*.json
+
+# Guides and documentation
+random/
+scatec/
+todo/
+app/__init__.py
+
+ravin_mcp/

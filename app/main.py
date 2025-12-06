@@ -6,6 +6,17 @@ from dotenv import load_dotenv
 from google.cloud import secretmanager
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+import markdown
+import json
+import sys
+import os
+
+# Add app directory to path for imports
+app_dir = os.path.dirname(os.path.abspath(__file__))
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
+
+from f1_mcp_server import get_f1_results, get_f1_schedule, plot_driver_lap_times
 
 daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
@@ -16,10 +27,14 @@ daisy_headers = (
 def Button(*c, cls='', **kw):
     return fc.Button(*c, cls=f"btn {cls}", **kw)
 
-def get_api_key():
+def get_api_key(use_secret_manager=None):
     """
     Get Google API key from Secret Manager (Cloud Run) or environment/.env (local).
     Priority: Environment Variable > Secret Manager > .env file
+    
+    Args:
+        use_secret_manager: If True, force Secret Manager usage. If False, skip Secret Manager.
+                           If None (default), auto-detect based on Cloud Run environment.
     
     For Cloud Run: Set GOOGLE_CLOUD_PROJECT env var and create secret named 'GOOGLE_API_KEY' in Secret Manager
     For local: Use .env file with GOOGLE_API_KEY=your_key
@@ -30,10 +45,15 @@ def get_api_key():
     if api_key:
         return api_key
     
-    # Check if we're running in Cloud Run (K_SERVICE is set by Cloud Run)
-    is_cloud_run = os.getenv('K_SERVICE') is not None
+    # Determine if we should try Secret Manager
+    if use_secret_manager is None:
+        # Auto-detect: Check if we're running in Cloud Run (K_SERVICE is set by Cloud Run)
+        should_use_secret_manager = os.getenv('K_SERVICE') is not None
+    else:
+        # Use explicit setting
+        should_use_secret_manager = use_secret_manager
     
-    if is_cloud_run:
+    if should_use_secret_manager:
         # Try Secret Manager
         try:
             # Cloud Run sets GOOGLE_CLOUD_PROJECT automatically, but sometimes it's not set
@@ -88,6 +108,7 @@ def layout(content):
             A('Home', href='/', cls='btn btn-ghost w-full justify-start'),
             A('Blog', href='/blog', cls='btn btn-ghost w-full justify-start'),
             A('Chatbot', href='/chatbot', cls='btn btn-ghost w-full justify-start'),
+            A('F1 MCP', href='/f1_mcp', cls='btn btn-ghost w-full justify-start'),
             A('About', href='/about', cls='btn btn-ghost w-full justify-start'),
             A('Python Interpreter', href='/python_intepreter', cls='btn btn-ghost w-full justify-start'),
             cls='flex flex-col gap-2 p-4'
@@ -106,7 +127,7 @@ def btn_res(nm:str): return f"Button Clicked, hello {nm}!"
 @rt
 def chatbot_res(message:str): 
     try:
-        api_key = get_api_key()
+        api_key = get_api_key(use_secret_manager=True)
         client = genai.Client(api_key=api_key)
 
         response = client.models.generate_content(
@@ -114,9 +135,93 @@ def chatbot_res(message:str):
             contents=message
         )
 
-        return response.text
+        # Convert markdown to HTML
+        html_content = markdown.markdown(response.text, extensions=['nl2br', 'fenced_code'])
+        return html_content
     except Exception as e:
         return f"Error: {str(e)}"
+
+@rt
+def f1_mcp_res(query: str):
+    """Process F1 queries using MCP tools with Gemini for natural language understanding"""
+    try:
+        if not query or not query.strip():
+            return "<p>Please enter a question.</p>"
+        
+        api_key = get_api_key(use_secret_manager=True)
+        client = genai.Client(api_key=api_key)
+        
+        # Ask Gemini to determine which tool to use
+        prompt = f"""Analyze this F1 query and determine which tool to use:
+- get_f1_schedule(year) for schedule questions
+- get_f1_results(year, race) for results questions
+- plot_driver_lap_times(year, race, driver_code) for lap time plots
+
+Query: {query}
+
+Respond in JSON: {{"tool": "tool_name", "year": 2024, "race": "race_name", "driver_code": "VER"}}
+Extract year (default 2024), race name, and driver code (3-letter code like VER, NOR, HAM) if needed.
+For plot requests, look for driver names or codes in the query."""
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        
+        # Parse Gemini's response
+        response_text = response.text.strip()
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        decision = json.loads(response_text)
+        tool_name = decision.get("tool")
+        year = decision.get("year", 2024)
+        race = decision.get("race")
+        driver_code = decision.get("driver_code")
+        
+        # Call the appropriate tool
+        if tool_name == "get_f1_schedule":
+            result = get_f1_schedule(year)
+            if "schedule" in result:
+                html = f"<h2>F1 Schedule {year}</h2><ul>"
+                for r in result["schedule"][:10]:
+                    html += f"<li><strong>Round {r.get('RoundNumber')}:</strong> {r.get('EventName')} - {r.get('Location')}, {r.get('Country')} ({r.get('EventDate')})</li>"
+                html += "</ul>"
+                return html
+            else:
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+        elif tool_name == "get_f1_results":
+            if not race:
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            result = get_f1_results(year, race)
+            if "results" in result:
+                html = f"<h2>{result.get('race')} {year} Results</h2><table class='table'><thead><tr><th>Pos</th><th>Driver</th><th>Team</th></tr></thead><tbody>"
+                for r in result["results"][:10]:
+                    html += f"<tr><td>{int(r.get('Position', 0))}</td><td>{r.get('BroadcastName')}</td><td>{r.get('TeamName')}</td></tr>"
+                html += "</tbody></table>"
+                return html
+            else:
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+        elif tool_name == "plot_driver_lap_times":
+            if not race:
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code:
+                return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
+            result = plot_driver_lap_times(year, race, driver_code.upper())
+            if "plot_html" in result:
+                # Return HTML directly - FastHTML will render it
+                return result["plot_html"]
+            else:
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+        else:
+            return f"<p>Error: Unknown tool '{tool_name}'</p>"
+    except json.JSONDecodeError as e:
+        return f"<p>Error parsing Gemini response: {str(e)}<br>Response was: {response.text[:200]}</p>"
+    except Exception as e:
+        import traceback
+        return f"<p>Error: {str(e)}<br><pre>{traceback.format_exc()}</pre></p>"
 
 @rt('/')
 def get(): 
@@ -130,7 +235,7 @@ def get():
 @rt('/blog')
 def get():
     return layout(Div(
-        H1('Welcom to the blog!', cls='text-3xl'), 
+        H1('Welcome to the blog!', cls='text-3xl'), 
     ))
 
 @rt('/chatbot')
@@ -140,15 +245,21 @@ def get():
         Form(
             Input(type='text', id='message', placeholder='Ask you question to the chatbot'),
             Button('Send', hx_post="/chatbot_res", hx_target='#dest'),
-            P(id='dest', cls='mt-4')
+            Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
         ),
         cls='flex flex-col gap-2 p-4'
     ))
 
-@rt('/about')
+@rt('/f1_mcp')
 def get():
     return layout(Div(
-        H1('Welcome to the about section!', cls='text-3xl'), 
+        H1('Welcome to the F1 MCP section!', cls='text-3xl'), 
+        Form(
+            Input(type='text', id='query', name='query', placeholder='Ask a F1 related question'),
+            Button('Send', hx_post="/f1_mcp_res", hx_target='#dest'),
+            Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
+        ),
+        cls='flex flex-col gap-2 p-4'
     ))
 
 @rt('/health')
