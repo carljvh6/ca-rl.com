@@ -4,6 +4,8 @@ import fasthtml.components as fc
 from google import genai
 from dotenv import load_dotenv
 from google.cloud import secretmanager
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
@@ -34,22 +36,43 @@ def get_api_key():
     if is_cloud_run:
         # Try Secret Manager
         try:
-            # Cloud Run sets GOOGLE_CLOUD_PROJECT automatically
+            # Cloud Run sets GOOGLE_CLOUD_PROJECT automatically, but sometimes it's not set
             project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+            
+            if not project_id:
+                # Try alternative env var names
+                project_id = os.getenv('GCP_PROJECT') or os.getenv('GCLOUD_PROJECT')
+            
+            # If still not found, try to get from metadata service (Cloud Run)
+            if not project_id:
+                try:
+                    metadata_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+                    req = Request(metadata_url)
+                    req.add_header("Metadata-Flavor", "Google")
+                    response = urlopen(req, timeout=2)
+                    project_id = response.read().decode('utf-8')
+                    print(f"Retrieved project ID from metadata service: {project_id}")
+                except (URLError, Exception) as meta_error:
+                    print(f"Could not get project ID from metadata: {meta_error}")
             
             if project_id:
                 secret_name = "GOOGLE_API_KEY"  # Secret name in Secret Manager
                 client = secretmanager.SecretManagerServiceClient()
                 name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+                print(f"Attempting to fetch secret: {name}")
                 response = client.access_secret_version(request={"name": name})
                 api_key = response.payload.data.decode("UTF-8")
                 if api_key:
+                    print("Successfully retrieved API key from Secret Manager")
                     return api_key
             else:
-                print("Warning: GOOGLE_CLOUD_PROJECT not set, skipping Secret Manager")
+                print(f"Warning: Project ID not found. Available env vars: K_SERVICE={os.getenv('K_SERVICE')}, GOOGLE_CLOUD_PROJECT={os.getenv('GOOGLE_CLOUD_PROJECT')}")
         except Exception as e:
-            # If Secret Manager fails, log but continue to try .env
-            print(f"Warning: Could not fetch from Secret Manager: {e}")
+            # If Secret Manager fails, log detailed error
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error fetching from Secret Manager: {str(e)}")
+            print(f"Traceback: {error_details}")
     
     # Fall back to .env file for local development
     load_dotenv()
