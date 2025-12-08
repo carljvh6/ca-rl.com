@@ -229,6 +229,12 @@ app, rt = fast_app(title="carldotcom's playground", hdrs = daisy_headers)
 # Import route modules to register their routes
 import rag_routes
 
+# Verify routes are registered (for debugging)
+if hasattr(app, 'routes'):
+    rag_routes_registered = any('/rag/ingestion' in str(r.path) for r in app.routes)
+    if not rag_routes_registered:
+        print("WARNING: /rag/ingestion route not found after importing rag_routes")
+
 # Ensure app is available for uvicorn/ASGI
 __all__ = ['app']
 

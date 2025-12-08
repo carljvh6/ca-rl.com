@@ -5,6 +5,9 @@ import os
 import json
 import fitz  # PyMuPDF
 from fasthtml.common import *
+
+# Import rt and layout from main
+# This import happens after main.py creates rt and layout, so it should work
 from main import rt, layout
 
 def format_vlm_json_human_readable(json_data):

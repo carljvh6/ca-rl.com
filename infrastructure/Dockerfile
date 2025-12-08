@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
+# Copy static files
+COPY static/ ./static/
+
 # Build argument for environment
 ARG ENV=dev
 ENV ENV=${ENV}
