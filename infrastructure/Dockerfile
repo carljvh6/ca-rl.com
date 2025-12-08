@@ -17,6 +17,14 @@ COPY app/ ./app/
 # Copy static files
 COPY static/ ./static/
 
+# Explicitly copy JSON files to ensure they're included (helps with Docker cache invalidation)
+COPY static/rag/*.json ./static/rag/
+
+# Verify critical JSON files exist (fail build if missing)
+RUN test -f /app/static/rag/nedbank_ex_parsed_pdf.json || (echo "ERROR: nedbank_ex_parsed_pdf.json not found!" && exit 1) && \
+    test -f /app/static/rag/nedbank_int_2024_full_report_parsed.json || (echo "ERROR: nedbank_int_2024_full_report_parsed.json not found!" && exit 1) && \
+    echo "✓ JSON files verified"
+
 # Build argument for environment
 ARG ENV=dev
 ENV ENV=${ENV}

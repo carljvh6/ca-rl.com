@@ -316,9 +316,21 @@ def register_rag_routes(rt):
             # Load and display the VLM parsed JSON
             try:
                 # Get the path to the JSON file
+                # Try multiple path resolution strategies
                 app_dir = os.path.dirname(os.path.abspath(__file__))
                 project_root = os.path.dirname(app_dir)
                 json_path = os.path.join(project_root, 'static', 'rag', 'nedbank_ex_parsed_pdf.json')
+                
+                # Debug: log the resolved path
+                import logging
+                logging.warning(f"Looking for JSON at: {json_path}")
+                logging.warning(f"File exists: {os.path.exists(json_path)}")
+                if not os.path.exists(json_path):
+                    # Try absolute path as fallback
+                    json_path_abs = '/app/static/rag/nedbank_ex_parsed_pdf.json'
+                    logging.warning(f"Trying absolute path: {json_path_abs}")
+                    if os.path.exists(json_path_abs):
+                        json_path = json_path_abs
                 
                 # Load JSON file
                 with open(json_path, 'r', encoding='utf-8') as f:
@@ -342,9 +354,21 @@ def register_rag_routes(rt):
             # Load and display the VLM parsed JSON in human-readable format
             try:
                 # Get the path to the JSON file
+                # Try multiple path resolution strategies
                 app_dir = os.path.dirname(os.path.abspath(__file__))
                 project_root = os.path.dirname(app_dir)
                 json_path = os.path.join(project_root, 'static', 'rag', 'nedbank_ex_parsed_pdf.json')
+                
+                # Debug: log the resolved path
+                import logging
+                logging.warning(f"Looking for JSON at: {json_path}")
+                logging.warning(f"File exists: {os.path.exists(json_path)}")
+                if not os.path.exists(json_path):
+                    # Try absolute path as fallback
+                    json_path_abs = '/app/static/rag/nedbank_ex_parsed_pdf.json'
+                    logging.warning(f"Trying absolute path: {json_path_abs}")
+                    if os.path.exists(json_path_abs):
+                        json_path = json_path_abs
                 
                 # Load JSON file
                 with open(json_path, 'r', encoding='utf-8') as f:
