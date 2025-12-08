@@ -43,7 +43,30 @@ def log_api_call(context: str, model: str, request_text: str):
 daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
     Script(src='https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'),
-    Script("document.documentElement.setAttribute('data-theme', 'dark');")
+    Script("document.documentElement.setAttribute('data-theme', 'dark');"),
+    Script("""
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.menu-toggle').forEach(function(toggle) {
+                const arrow = toggle.querySelector('[id$="_arrow"]');
+                if (arrow) {
+                    arrow.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const contentId = toggle.getAttribute('data-content-id');
+                        const arrowId = toggle.getAttribute('data-arrow-id');
+                        const content = document.getElementById(contentId);
+                        const arrowEl = document.getElementById(arrowId);
+                        if (content) {
+                            content.classList.toggle('hidden');
+                        }
+                        if (arrowEl) {
+                            arrowEl.classList.toggle('rotate-180');
+                        }
+                    });
+                }
+            });
+        });
+    """)
 )
 
 def Button(*c, cls='', **kw):
@@ -134,15 +157,62 @@ def get_api_key(use_secret_manager=None):
     print("The app will start but API-dependent routes will fail.")
     return None
 
+def create_menu_item(label, href=None, sub_items=None, menu_id=None):
+    """Create a menu item with optional sub-items"""
+    if sub_items:
+        # Create collapsible menu item with sub-items
+        if not menu_id:
+            menu_id = f"menu_{label.lower().replace(' ', '_').replace('/', '_')}"
+        content_id = f"{menu_id}_content"
+        arrow_id = f"{menu_id}_arrow"
+        # Get the main page href from the first sub-item
+        main_href = sub_items[0][1] if sub_items else href
+        
+        return Div(
+            A(
+                Span(label, cls='flex-1 text-left'),
+                Span('▼', cls='text-xs transition-transform', id=arrow_id),
+                href=main_href,
+                cls='btn btn-ghost w-full justify-between cursor-pointer menu-toggle',
+                **{'data-content-id': content_id, 'data-arrow-id': arrow_id}
+            ),
+            Div(
+                *[A(sub_label, href=sub_href, cls='btn btn-ghost w-full justify-start pl-8 text-sm py-2 h-auto min-h-0') 
+                  for sub_label, sub_href in sub_items],
+                cls='flex flex-col gap-1 pl-4 hidden transition-all',
+                id=content_id
+            ),
+            cls='w-full'
+        )
+    else:
+        # Simple menu item without sub-items
+        return A(label, href=href, cls='btn btn-ghost w-full justify-start')
+
 def layout(content):
+    # Define menu structure with sub-items
+    menu_items = [
+        create_menu_item('Home', sub_items=[
+            ('Main', '/'),
+        ]),
+        create_menu_item('Blog', sub_items=[
+            ('Main', '/blog'),
+        ]),
+        create_menu_item('Chatbot', sub_items=[
+            ('Main', '/chatbot'),
+            ('Info', '/chatbot/info'),
+        ]),
+        create_menu_item('F1 MCP', sub_items=[
+            ('Main', '/f1_mcp'),
+            ('Info', '/f1_mcp/info'),
+        ]),
+        create_menu_item('About', sub_items=[
+            ('Main', '/about'),
+        ]),
+    ]
+    
     sidebar = Div(
         Div(
-            A('Home', href='/', cls='btn btn-ghost w-full justify-start'),
-            A('Blog', href='/blog', cls='btn btn-ghost w-full justify-start'),
-            A('Chatbot', href='/chatbot', cls='btn btn-ghost w-full justify-start'),
-            A('F1 MCP', href='/f1_mcp', cls='btn btn-ghost w-full justify-start'),
-            A('About', href='/about', cls='btn btn-ghost w-full justify-start'),
-            A('Python Interpreter', href='/python_intepreter', cls='btn btn-ghost w-full justify-start'),
+            *menu_items,
             cls='flex flex-col gap-2 p-4'
         ),
         cls='w-64 min-h-screen bg-base-100'
@@ -468,6 +538,48 @@ def get():
 def get():
     return layout(Div(
         H1('Welcom to the python intepreter!', cls='text-3xl'), 
+    ))
+
+@rt('/about')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/blog/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/chatbot/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/f1_mcp/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/about/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
+    ))
+
+@rt('/python_intepreter/info')
+def get():
+    return layout(Div(
+        H1('Under Construction', cls='text-3xl'), 
     ))
 
 # Only run serve() when running locally (not in Cloud Run)
