@@ -25,3 +25,6 @@ EXPOSE 8080
 # Run FastHTML app using Uvicorn (ASGI server)
 # FastHTML apps are ASGI-compatible
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
+

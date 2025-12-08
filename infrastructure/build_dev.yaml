@@ -19,3 +19,6 @@ steps:
     args: ['push', 'eu.gcr.io/$PROJECT_ID/fasthtml-app:latest']
 
 timeout: 900s
+
+
+
