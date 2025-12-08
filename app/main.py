@@ -205,6 +205,10 @@ def layout(content):
             ('Main', '/f1_mcp'),
             ('Info', '/f1_mcp/info'),
         ]),
+        create_menu_item('RAG', sub_items=[
+            ('Ingestion', '/rag/ingestion'),
+            ('Info', '/rag/info'),
+        ]),
         create_menu_item('About', sub_items=[
             ('Main', '/about'),
         ]),
@@ -221,6 +225,9 @@ def layout(content):
     return Div(sidebar, main_content, cls='flex')
 
 app, rt = fast_app(title="carldotcom's playground", hdrs = daisy_headers)
+
+# Import route modules to register their routes
+import rag_routes
 
 # Ensure app is available for uvicorn/ASGI
 __all__ = ['app']
@@ -263,17 +270,17 @@ def f1_mcp_res(query: str):
         
         # Ask Gemini to determine which tool to use
         prompt = f"""Analyze this F1 query and determine which tool to use:
-- get_f1_schedule(year) for schedule questions
-- get_f1_results(year, race) for results questions
-- get_driver_lap_times(year, race, driver_code) for lap time data (without plotting)
-- plot_driver_lap_times(year, race, driver_code) for single driver lap time plots
-- compare_driver_lap_times(year, race, driver_code1, driver_code2) for comparing two drivers' lap times
+            - get_f1_schedule(year) for schedule questions
+            - get_f1_results(year, race) for results questions
+            - get_driver_lap_times(year, race, driver_code) for lap time data (without plotting)
+            - plot_driver_lap_times(year, race, driver_code) for single driver lap time plots
+            - compare_driver_lap_times(year, race, driver_code1, driver_code2) for comparing two drivers' lap times
 
-Query: {query}
+            Query: {query}
 
-Respond in JSON: {{"tool": "tool_name", "year": 2024, "race": "race_name", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "VER"}}
-Extract year (default 2025), race name, and driver code(s) (3-letter code like VER, NOR, HAM) if needed.
-For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2."""
+            Respond in JSON: {{"tool": "tool_name", "year": 2024, "race": "race_name", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "VER"}}
+            Extract year (default 2025), race name, and driver code(s) (3-letter code like VER, NOR, HAM) if needed.
+            For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2."""
         
         log_api_call("F1 MCP", "gemini-2.0-flash-lite", prompt)
         
@@ -442,27 +449,27 @@ For comparison requests mentioning two drivers, use compare_driver_lap_times wit
             # Create analysis prompt for LLM
             analysis_prompt = f"""Analyze the lap time comparison between {driver_code1} and {driver_code2} in the {race} {year} race.
 
-Statistics:
-- {driver_code1}: Average {driver1_avg:.3f}s, Fastest {driver1_min:.3f}s, Slowest {driver1_max:.3f}s
-- {driver_code2}: Average {driver2_avg:.3f}s, Fastest {driver2_min:.3f}s, Slowest {driver2_max:.3f}s
+                Statistics:
+                - {driver_code1}: Average {driver1_avg:.3f}s, Fastest {driver1_min:.3f}s, Slowest {driver1_max:.3f}s
+                - {driver_code2}: Average {driver2_avg:.3f}s, Fastest {driver2_min:.3f}s, Slowest {driver2_max:.3f}s
 
-Pit Stops:
-- {driver_code1} pit stops: {json.dumps(driver1_pit_stops, indent=2) if driver1_pit_stops else "No pit stops recorded"}
-- {driver_code2} pit stops: {json.dumps(driver2_pit_stops, indent=2) if driver2_pit_stops else "No pit stops recorded"}
+                Pit Stops:
+                - {driver_code1} pit stops: {json.dumps(driver1_pit_stops, indent=2) if driver1_pit_stops else "No pit stops recorded"}
+                - {driver_code2} pit stops: {json.dumps(driver2_pit_stops, indent=2) if driver2_pit_stops else "No pit stops recorded"}
 
-Laps with significant differences (>0.5s):
-{json.dumps(slower_laps_info[:20], indent=2)}
+                Laps with significant differences (>0.5s):
+                {json.dumps(slower_laps_info[:20], indent=2)}
 
-User query: {query}
+                User query: {query}
 
-Provide a detailed analysis focusing on:
-1. Overall performance comparison
-2. When and why one driver had slower laps
-3. Pit stop strategies and their impact on lap times
-4. Patterns in the lap time differences, especially around pit stops
-5. Any notable events or strategies visible in the data
+                Provide a detailed analysis focusing on:
+                1. Overall performance comparison
+                2. When and why one driver had slower laps
+                3. Pit stop strategies and their impact on lap times
+                4. Patterns in the lap time differences, especially around pit stops
+                5. Any notable events or strategies visible in the data
 
-Write in a clear, informative style suitable for F1 fans. Pay special attention to how pit stops affected lap times and race strategy."""
+                Write in a clear, informative style suitable for F1 fans. Pay special attention to how pit stops affected lap times and race strategy."""
             
             log_api_call("F1 MCP Analysis", "gemini-2.5-flash-lite", analysis_prompt[:200])
             
@@ -534,12 +541,6 @@ def get():
     """Health check endpoint for Cloud Run"""
     return {"status": "ok", "service": "fasthtml-app"}
 
-@rt('/python_intepreter')
-def get():
-    return layout(Div(
-        H1('Welcom to the python intepreter!', cls='text-3xl'), 
-    ))
-
 @rt('/about')
 def get():
     return layout(Div(
@@ -567,20 +568,10 @@ def get():
 @rt('/f1_mcp/info')
 def get():
     return layout(Div(
-        H1('Under Construction', cls='text-3xl'), 
+        H1('F1 MCP Info', cls='text-3xl'), 
+        P('This is a page where I worked on implementing an MCP server that can answer F1 related questions.'),
     ))
 
-@rt('/about/info')
-def get():
-    return layout(Div(
-        H1('Under Construction', cls='text-3xl'), 
-    ))
-
-@rt('/python_intepreter/info')
-def get():
-    return layout(Div(
-        H1('Under Construction', cls='text-3xl'), 
-    ))
 
 # Only run serve() when running locally (not in Cloud Run)
 if __name__ == "__main__":

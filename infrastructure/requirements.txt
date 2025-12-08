@@ -23,3 +23,6 @@ nbformat==5.10.4
 
 # MCP (Model Context Protocol)
 fastmcp>=0.9.0
+
+# PDF processing
+pymupdf>=1.23.0
