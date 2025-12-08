@@ -206,7 +206,9 @@ def layout(content):
             ('Info', '/f1_mcp/info'),
         ]),
         create_menu_item('RAG', sub_items=[
+            ('Main', '/rag'),
             ('Ingestion', '/rag/ingestion'),
+            # ('Retrieval', '/rag/retrieval'),  # COMMENTED OUT - Retrieval functionality temporarily disabled
             ('Info', '/rag/info'),
         ]),
         create_menu_item('About', sub_items=[
@@ -226,8 +228,9 @@ def layout(content):
 
 app, rt = fast_app(title="carldotcom's playground", hdrs = daisy_headers)
 
-# Import route modules to register their routes
+# Import and register route modules
 import rag_routes
+rag_routes.register_rag_routes(rt)
 
 # Verify routes are registered (for debugging)
 if hasattr(app, 'routes'):
