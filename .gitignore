@@ -31,6 +31,7 @@ Thumbs.db
 # Secrets and credentials
 *.json
 !package.json
+!static/rag/*.json
 deploy_key.json
 service_acc_key.json
 .env
@@ -48,3 +49,4 @@ todo/
 app/__init__.py
 
 ravin_mcp/
+assets/
