@@ -44,6 +44,28 @@ daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
     Script(src='https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'),
     Script("document.documentElement.setAttribute('data-theme', 'dark');"),
+    Style("""
+        @keyframes hourglass-spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hourglass-loader {
+            display: inline-block;
+            font-size: 1.5rem;
+            animation: hourglass-spin 1s linear infinite;
+        }
+        .htmx-indicator {
+            opacity: 0;
+            transition: opacity 200ms ease-in;
+            pointer-events: none;
+        }
+        .htmx-request .htmx-indicator {
+            opacity: 1;
+        }
+        .htmx-request.htmx-indicator {
+            opacity: 1;
+        }
+    """),
     Script("""
         document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('.menu-toggle').forEach(function(toggle) {
@@ -71,6 +93,10 @@ daisy_headers = (
 
 def Button(*c, cls='', **kw):
     return fc.Button(*c, cls=f"btn {cls}", **kw)
+
+def HourglassLoader(cls='', **kw):
+    """Create a spinning hourglass loading indicator"""
+    return Span('⏳', cls=f'hourglass-loader htmx-indicator {cls}', **kw)
 
 def get_api_key(use_secret_manager=None):
     """
@@ -511,7 +537,11 @@ def get():
     return layout(Form(
         H1('Welcome to the playground!', cls='text-3xl'), 
         Input(type='text', id='nm', placeholder='Enter your name'),
-        Button('Click me', hx_post="/btn_res", hx_target='#dest'),
+        Div(
+            Button('Click me', hx_post="/btn_res", hx_target='#dest', hx_indicator='#loading-home'),
+            HourglassLoader(cls='ml-2', id='loading-home'),
+            cls='flex items-center'
+        ),
         P(id='dest', cls='mt-4')
     ))
 
@@ -527,7 +557,11 @@ def get():
         H1('Welcome to the chatbot!', cls='text-3xl'), 
         Form(
             Input(type='text', id='message', placeholder='Ask you question to the chatbot'),
-            Button('Send', hx_post="/chatbot_res", hx_target='#dest'),
+            Div(
+                Button('Send', hx_post="/chatbot_res", hx_target='#dest', hx_indicator='#loading-chatbot'),
+                HourglassLoader(cls='ml-2', id='loading-chatbot'),
+                cls='flex items-center'
+            ),
             Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
         ),
         cls='flex flex-col gap-2 p-4'
@@ -539,7 +573,11 @@ def get():
         H1('Welcome to the F1 MCP section!', cls='text-3xl'), 
         Form(
             Input(type='text', id='query', name='query', placeholder='Ask a F1 related question'),
-            Button('Send', hx_post="/f1_mcp_res", hx_target='#dest'),
+            Div(
+                Button('Send', hx_post="/f1_mcp_res", hx_target='#dest', hx_indicator='#loading-f1'),
+                HourglassLoader(cls='ml-2', id='loading-f1'),
+                cls='flex items-center'
+            ),
             Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
         ),
         cls='flex flex-col gap-2 p-4'
