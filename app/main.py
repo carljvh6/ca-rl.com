@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 import markdown
 import json
+import re
 import contextvars
 import html as html_lib
 import logging
@@ -144,6 +145,239 @@ def _f1_strip_json_blob(response_text: str) -> str:
         if start != -1 and end != -1 and end > start:
             response_text = response_text[start : end + 1]
     return response_text.strip()
+
+
+def _driver_name_token_pattern(token: str) -> re.Pattern:
+    """Whole-token match so short names like Max do not match inside unrelated words."""
+    t = token.strip().lower()
+    if " " in t:
+        inner = r"\s+".join(re.escape(p) for p in t.split())
+        return re.compile(rf"(?i)\b{inner}\b")
+    return re.compile(rf"(?i)\b{re.escape(t)}\b")
+
+
+# Longer tokens first so longer names win over shorter prefixes (e.g. alexander before alex).
+_F1_DRIVER_NAME_TOKENS: tuple[tuple[str, str], ...] = tuple(
+    sorted(
+        {
+            # Surnames
+            "alonso": "ALO",
+            "albon": "ALB",
+            "antonelli": "ANT",
+            "bearman": "BEA",
+            "bortoleto": "BOR",
+            "bottas": "BOT",
+            "colapinto": "COL",
+            "de vries": "DEV",
+            "devries": "DEV",
+            "gasly": "GAS",
+            "hamilton": "HAM",
+            "hulkenberg": "HUL",
+            "lawson": "LAW",
+            "leclerc": "LEC",
+            "lindblad": "LIN",
+            "magnussen": "MAG",
+            "norris": "NOR",
+            "ocon": "OCO",
+            "piastri": "PIA",
+            "perez": "PER",
+            "ricciardo": "RIC",
+            "russell": "RUS",
+            "sainz": "SAI",
+            "sargeant": "SAR",
+            "stroll": "STR",
+            "tsunoda": "TSU",
+            "verstappen": "VER",
+            "zhou": "ZHO",
+            # First / familiar names (current-ish grid)
+            "alexander": "ALB",
+            "alex": "ALB",
+            "andrea": "ANT",
+            "carlos": "SAI",
+            "charles": "LEC",
+            "daniel": "RIC",
+            "esteban": "OCO",
+            "fernando": "ALO",
+            "george": "RUS",
+            "guanyu": "ZHO",
+            "lance": "STR",
+            "lando": "NOR",
+            "lewis": "HAM",
+            "liam": "LAW",
+            "logan": "SAR",
+            "max": "VER",
+            "nico": "HUL",
+            "oliver": "BEA",
+            "oscar": "PIA",
+            "pierre": "GAS",
+            "sergio": "PER",
+            "valtteri": "BOT",
+            "yuki": "TSU",
+        }.items(),
+        key=lambda kv: len(kv[0]),
+        reverse=True,
+    )
+)
+
+
+def _infer_driver_codes_from_natural_language(query: str, log: list[str]) -> tuple[str | None, str | None]:
+    """Infer two 3-letter codes from first or last names in natural language."""
+    q = (query or "").strip()
+    if not q:
+        return None, None
+    hits: list[tuple[int, str]] = []
+    for token, code in _F1_DRIVER_NAME_TOKENS:
+        pat = _driver_name_token_pattern(token)
+        for m in pat.finditer(q):
+            hits.append((m.start(), code))
+    hits.sort(key=lambda h: h[0])
+    ordered: list[str] = []
+    for _, code in hits:
+        if code not in ordered:
+            ordered.append(code)
+    if len(ordered) >= 2:
+        _f1_trace(
+            log,
+            f"Routing JSON: inferred driver codes from names -> {ordered[0]!r}, {ordered[1]!r}",
+        )
+        return ordered[0], ordered[1]
+    return None, None
+
+
+def _coerce_driver_code_value(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and value:
+        value = value[0]
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if len(s) == 3 and s.isalpha():
+            return s.upper()
+        return s
+    if isinstance(value, (int, float)):
+        return str(int(value)) if float(value).is_integer() else str(value)
+    return str(value).strip() or None
+
+
+def _normalize_f1_routing_decision(decision: dict, *, query: str, log: list[str]) -> dict:
+    """Align small local LLM JSON with the keys our tool router expects."""
+    out = dict(decision)
+    tool = str(out.get("tool") or "")
+
+    if not out.get("driver_code1"):
+        for key in (
+            "driver1",
+            "driver_a",
+            "driver_1",
+            "d1",
+            "first_driver",
+            "driver_one",
+            "code1",
+            "driver_code_1",
+            "driver_name_1",
+            "primary_driver",
+        ):
+            if key in out:
+                v = _coerce_driver_code_value(out.get(key))
+                if v:
+                    out["driver_code1"] = v
+                    _f1_trace(log, f"Routing JSON: mapped {key!r} -> driver_code1={v!r}")
+                    break
+
+    if not out.get("driver_code2"):
+        for key in (
+            "driver2",
+            "driver_b",
+            "driver_2",
+            "d2",
+            "second_driver",
+            "driver_two",
+            "code2",
+            "driver_code_2",
+            "driver_name_2",
+            "secondary_driver",
+        ):
+            if key in out:
+                v = _coerce_driver_code_value(out.get(key))
+                if v:
+                    out["driver_code2"] = v
+                    _f1_trace(log, f"Routing JSON: mapped {key!r} -> driver_code2={v!r}")
+                    break
+
+    seq = out.get("drivers") or out.get("driver_codes") or out.get("driver_pair")
+    if isinstance(seq, dict):
+        for k1, k2 in (
+            ("driver1", "driver2"),
+            ("driver_a", "driver_b"),
+            ("first", "second"),
+            ("d1", "d2"),
+        ):
+            if not out.get("driver_code1") and seq.get(k1):
+                out["driver_code1"] = _coerce_driver_code_value(seq.get(k1))
+            if not out.get("driver_code2") and seq.get(k2):
+                out["driver_code2"] = _coerce_driver_code_value(seq.get(k2))
+        if out.get("driver_code1") or out.get("driver_code2"):
+            _f1_trace(log, "Routing JSON: expanded nested driver object for codes")
+    elif isinstance(seq, (list, tuple)) and len(seq) >= 2:
+        if not out.get("driver_code1"):
+            out["driver_code1"] = _coerce_driver_code_value(seq[0])
+        if not out.get("driver_code2"):
+            out["driver_code2"] = _coerce_driver_code_value(seq[1])
+        if out.get("driver_code1") and out.get("driver_code2"):
+            _f1_trace(log, "Routing JSON: mapped drivers[] -> driver_code1/driver_code2")
+
+    if tool in {"compare_driver_lap_times", "compare_qualifying_runs"} and (
+        not out.get("driver_code1") or not out.get("driver_code2")
+    ):
+        q = (query or "").upper()
+        pair = re.search(
+            r"\b([A-Z]{3})\b\s+(?:VS\.?|AND)\s+\b([A-Z]{3})\b",
+            q,
+        )
+        noise = {
+            "THE",
+            "AND",
+            "FOR",
+            "BUT",
+            "WHO",
+            "WON",
+            "HAS",
+            "HAD",
+            "ALL",
+            "NOT",
+            "YET",
+            "ARE",
+            "WAS",
+            "LAP",
+            "ONE",
+            "TWO",
+            "ANY",
+            "ITS",
+            "OUT",
+            "PER",
+            "HOW",
+            "WHY",
+        }
+        if pair:
+            a, b = pair.group(1), pair.group(2)
+            if a not in noise and b not in noise and a != b:
+                if not out.get("driver_code1"):
+                    out["driver_code1"] = a
+                if not out.get("driver_code2"):
+                    out["driver_code2"] = b
+                _f1_trace(log, f"Routing JSON: inferred pair from query -> {a!r} vs {b!r}")
+
+        if (not out.get("driver_code1") or not out.get("driver_code2")) and query:
+            a, b = _infer_driver_codes_from_natural_language(query, log)
+            if a and b:
+                if not out.get("driver_code1"):
+                    out["driver_code1"] = a
+                if not out.get("driver_code2"):
+                    out["driver_code2"] = b
+
+    return out
 
 
 def _f1_generate_llm_text(
@@ -516,6 +750,13 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2 unless the request is specifically about qualifying runs or qualifying segments, in which case use compare_qualifying_runs.
             For "lap times" without "plot" or "graph", use get_driver_lap_times.
             For "plot" or "graph", use plot_driver_lap_times."""
+        if use_local:
+            prompt += """
+
+            CRITICAL — JSON keys must match exactly:
+            - Single-driver tools: use driver_code (3-letter UPPERCASE, e.g. NOR).
+            - Two-driver compare tools: use driver_code1 AND driver_code2 (not driver1/driver2, not a drivers array).
+            Values must be 3-letter F1 timing codes in UPPERCASE only, not full names."""
 
         routing_response_text = _f1_generate_llm_text(
             use_local=use_local,
@@ -529,6 +770,7 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
         response_text = _f1_strip_json_blob(routing_response_text)
 
         decision = json.loads(response_text)
+        decision = _normalize_f1_routing_decision(decision, query=query, log=log)
         tool_name = decision.get("tool")
         year = decision.get("year", 2024)
         race = decision.get("race")
