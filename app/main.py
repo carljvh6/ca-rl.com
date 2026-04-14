@@ -22,6 +22,11 @@ if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
 from f1_mcp_server import get_f1_results, get_f1_schedule, get_driver_lap_times, plot_driver_lap_times, compare_driver_lap_times
+from f1_mcp.rendering.html_sections import (
+    build_comparison_analysis_prompt,
+    render_comparison_analysis_section,
+    render_lap_times_table,
+)
 
 f1_mcp_log_ctx: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "f1_mcp_log_ctx", default=None
@@ -416,15 +421,7 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
             _f1_trace(log, f"Tool call: get_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r})")
             result = get_driver_lap_times(year, race, driver_code.upper())
             if "lap_data" in result:
-                # Create table HTML from lap data
-                table_html = "<div class='mt-4'><h3 class='text-2xl mb-4'>Lap Times</h3><table class='table table-zebra w-full'><thead><tr><th>Lap</th><th>Lap Time</th><th>Lap Time (s)</th><th>Compound</th></tr></thead><tbody>"
-                for lap in result["lap_data"]:
-                    lap_num = lap.get('LapNumber', '')
-                    lap_time = lap.get('LapTime', '')
-                    lap_time_seconds = lap.get('LapTimeSeconds', '')
-                    compound = lap.get('Compound', '')
-                    table_html += f"<tr><td>{lap_num}</td><td>{lap_time}</td><td>{lap_time_seconds:.3f}</td><td>{compound}</td></tr>"
-                table_html += "</tbody></table></div>"
+                table_html = render_lap_times_table(result["lap_data"], include_seconds=True)
                 _f1_trace(log, f"get_driver_lap_times OK ({len(result['lap_data'])} laps)")
                 return table_html
             else:
@@ -445,13 +442,7 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
                 
                 # Create table HTML from lap data
                 if "lap_data" in result and result["lap_data"]:
-                    table_html = "<div class='mt-8'><h3 class='text-2xl mb-4'>Lap Times</h3><table class='table table-zebra w-full'><thead><tr><th>Lap</th><th>Lap Time</th><th>Compound</th></tr></thead><tbody>"
-                    for lap in result["lap_data"]:
-                        lap_num = lap.get('LapNumber', '')
-                        lap_time = lap.get('LapTime', '')
-                        compound = lap.get('Compound', '')
-                        table_html += f"<tr><td>{lap_num}</td><td>{lap_time}</td><td>{compound}</td></tr>"
-                    table_html += "</tbody></table></div>"
+                    table_html = render_lap_times_table(result["lap_data"], include_seconds=False)
                     _f1_trace(log, "plot_driver_lap_times OK (plot + table)")
                     return plot_html + table_html
                 else:
@@ -485,90 +476,15 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
                 return f"<p>Error: Failed to generate comparison plot.</p>"
             
             plot_html = result["plot_html"]
-            driver1_data = result.get("driver1_lap_data", [])
-            driver2_data = result.get("driver2_lap_data", [])
-            
-            # Prepare data summary for LLM analysis
-            # Calculate statistics for analysis
-            driver1_times = [lap["LapTimeSeconds"] for lap in driver1_data]
-            driver2_times = [lap["LapTimeSeconds"] for lap in driver2_data]
-            
-            driver1_avg = sum(driver1_times) / len(driver1_times) if driver1_times else 0
-            driver2_avg = sum(driver2_times) / len(driver2_times) if driver2_times else 0
-            driver1_min = min(driver1_times) if driver1_times else 0
-            driver2_min = min(driver2_times) if driver2_times else 0
-            driver1_max = max(driver1_times) if driver1_times else 0
-            driver2_max = max(driver2_times) if driver2_times else 0
-            
-            # Find slower laps (where one driver was significantly slower)
-            slower_laps_info = []
-            for i, lap1 in enumerate(driver1_data):
-                lap_num = lap1["LapNumber"]
-                time1 = lap1["LapTimeSeconds"]
-                # Find corresponding lap for driver 2
-                lap2_match = next((lap for lap in driver2_data if lap["LapNumber"] == lap_num), None)
-                if lap2_match:
-                    time2 = lap2_match["LapTimeSeconds"]
-                    diff = abs(time1 - time2)
-                    if diff > 0.5:  # Significant difference (>0.5 seconds)
-                        slower_driver = driver_code1 if time1 > time2 else driver_code2
-                        slower_laps_info.append({
-                            "lap": lap_num,
-                            f"{driver_code1}_time": time1,
-                            f"{driver_code2}_time": time2,
-                            "difference": diff,
-                            "slower_driver": slower_driver
-                        })
-            
-            # Extract pit stop information for both drivers
-            def extract_pit_stops(lap_data, driver_code):
-                pit_stops = []
-                for lap in lap_data:
-                    pit_in = lap.get("PitInTime", "")
-                    pit_out = lap.get("PitOutTime", "")
-                    # Check if pit stop occurred (not NaT or empty)
-                    if pit_in and pit_in != "NaT" and pit_in != "nat" and str(pit_in) != "nan":
-                        pit_stops.append({
-                            "lap": lap.get("LapNumber"),
-                            "pit_in": pit_in,
-                            "pit_out": pit_out if pit_out and pit_out != "NaT" and pit_out != "nat" and str(pit_out) != "nan" else None
-                        })
-                    elif pit_out and pit_out != "NaT" and pit_out != "nat" and str(pit_out) != "nan":
-                        # Sometimes only pit out is recorded
-                        pit_stops.append({
-                            "lap": lap.get("LapNumber"),
-                            "pit_in": None,
-                            "pit_out": pit_out
-                        })
-                return pit_stops
-            
-            driver1_pit_stops = extract_pit_stops(driver1_data, driver_code1)
-            driver2_pit_stops = extract_pit_stops(driver2_data, driver_code2)
-            
-            # Create analysis prompt for LLM
-            analysis_prompt = f"""Analyze the lap time comparison between {driver_code1} and {driver_code2} in the {race} {year} race.
-
-                Statistics:
-                - {driver_code1}: Average {driver1_avg:.3f}s, Fastest {driver1_min:.3f}s, Slowest {driver1_max:.3f}s
-                - {driver_code2}: Average {driver2_avg:.3f}s, Fastest {driver2_min:.3f}s, Slowest {driver2_max:.3f}s
-
-                Pit Stops:
-                - {driver_code1} pit stops: {json.dumps(driver1_pit_stops, indent=2) if driver1_pit_stops else "No pit stops recorded"}
-                - {driver_code2} pit stops: {json.dumps(driver2_pit_stops, indent=2) if driver2_pit_stops else "No pit stops recorded"}
-
-                Laps with significant differences (>0.5s):
-                {json.dumps(slower_laps_info[:20], indent=2)}
-
-                User query: {query}
-
-                Provide a detailed analysis focusing on:
-                1. Overall performance comparison
-                2. When and why one driver had slower laps
-                3. Pit stop strategies and their impact on lap times
-                4. Patterns in the lap time differences, especially around pit stops
-                5. Any notable events or strategies visible in the data
-
-                Write in a clear, informative style suitable for F1 fans. Pay special attention to how pit stops affected lap times and race strategy."""
+            comparison_summary = result.get("comparison_summary", {})
+            analysis_prompt = build_comparison_analysis_prompt(
+                year,
+                race,
+                driver_code1.upper(),
+                driver_code2.upper(),
+                comparison_summary,
+                query,
+            )
             
             log_api_call("F1 MCP Analysis", "gemini-2.5-flash-lite", analysis_prompt[:200])
             _f1_trace(log, "Gemini analysis: request sent (gemini-2.5-flash-lite)")
@@ -581,9 +497,7 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
                 )
                 analysis_text = analysis_response.text
 
-                # Convert markdown to HTML
-                analysis_html = markdown.markdown(analysis_text, extensions=['nl2br', 'fenced_code'])
-                analysis_section = f"<div class='mt-8 prose prose-invert max-w-none'><h3 class='text-2xl mb-4'>Analysis</h3>{analysis_html}</div>"
+                analysis_section = render_comparison_analysis_section(analysis_text)
                 _f1_trace(log, f"Gemini analysis OK ({len(analysis_text)} chars)")
             except Exception as e:
                 analysis_section = f"<div class='mt-8'><p class='text-red-400'>Error generating analysis: {str(e)}</p></div>"

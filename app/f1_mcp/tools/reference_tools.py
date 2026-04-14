@@ -1,0 +1,46 @@
+"""Reference-style MCP tool implementations for schedules and results."""
+
+from __future__ import annotations
+
+import logging
+
+from f1_mcp.providers.schedule_provider import get_schedule_df
+from f1_mcp.providers.session_provider import load_session
+from f1_mcp.schemas.session_models import ScheduleEntry
+
+logger = logging.getLogger("f1_mcp_server")
+
+
+def get_f1_results(year: int, race: str, session_type: str = "R") -> dict:
+    """Get F1 session results while preserving the current race-results payload shape."""
+    logger.info("Getting F1 results for %s - %s (%s)", year, race, session_type)
+    try:
+        session = load_session(year, race, session_type)
+        if not hasattr(session, "results") or session.results is None or session.results.empty:
+            return {"error": f"No race data available for {year} - {race}"}
+
+        cls = ["BroadcastName", "TeamName", "Position"]
+        df = session.results[cls].sort_values(by="Position", ascending=True)
+        return {"year": year, "race": race, "results": df.to_dict("records")}
+    except Exception as exc:
+        logger.error("Error getting F1 results: %s", exc)
+        return {"error": str(exc)}
+
+
+def get_f1_schedule(year: int) -> dict:
+    """Get the season schedule while preserving the current payload shape."""
+    logger.info("Getting F1 schedule for %s", year)
+    try:
+        schedule_df = get_schedule_df(year)
+        if schedule_df.empty:
+            return {"error": f"No schedule data available for {year}"}
+
+        cols = ["RoundNumber", "EventName", "Country", "Location", "EventDate"]
+        records = []
+        for row in schedule_df[cols].copy().to_dict("records"):
+            row["EventDate"] = str(row.get("EventDate")) if row.get("EventDate") is not None else None
+            records.append(ScheduleEntry(**row).to_dict())
+        return {"year": year, "schedule": records}
+    except Exception as exc:
+        logger.error("Error getting F1 schedule: %s", exc)
+        return {"error": str(exc)}
