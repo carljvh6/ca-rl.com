@@ -21,14 +21,29 @@ app_dir = os.path.dirname(os.path.abspath(__file__))
 if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
-from f1_mcp_server import get_f1_results, get_f1_schedule, get_driver_lap_times, plot_driver_lap_times, compare_driver_lap_times
+from f1_mcp_server import (
+    analyze_qualifying_runs,
+    compare_driver_lap_times,
+    compare_qualifying_runs,
+    get_driver_lap_times,
+    get_f1_results,
+    get_f1_schedule,
+    plot_driver_lap_times,
+)
 from f1_mcp.rendering.html_sections import (
     build_comparison_analysis_prompt,
+    format_session_context,
+    format_session_heading,
     render_comparison_analysis_section,
+    render_qualifying_comparison_prose,
+    render_qualifying_comparison_sections,
+    render_qualifying_runs_prose,
+    render_qualifying_runs_sections,
     render_lap_times_table,
     render_results_summary,
     render_results_table,
 )
+from f1_mcp.rendering.plots import render_qualifying_comparison_plot, render_qualifying_runs_plot
 from f1_mcp.local_llm import get_local_llm_config, ollama_generate
 
 example_prompts = {
@@ -45,7 +60,7 @@ example_prompts = {
         "Plot Charles Leclerc's lap times for Monza 2025",
     ],
     "Driver comparisons": [
-        "Compare Verstappen and Norris in Bahrain 2025",
+        "Compare Verstappen and Norris in Bahrain 2025 qualifying",
         "Compare Hamilton and Russell lap times at Silverstone 2025",
     ],
     "Advanced analysis": [
@@ -156,6 +171,35 @@ def _f1_generate_llm_text(
         contents=prompt,
     )
     return (response.text or "").strip()
+
+
+def _is_qualifying_runs_query(query: str, session_type: str) -> bool:
+    normalized = str(session_type or "").strip().upper()
+    if normalized not in {"Q", "SQ"}:
+        return False
+    query_lower = (query or "").lower()
+    keywords = (
+        "qualifying analysis",
+        "q1",
+        "q2",
+        "q3",
+        "hot lap",
+        "hot laps",
+        "flying lap",
+        "flying laps",
+        "push lap",
+        "push laps",
+        "cool lap",
+        "cool laps",
+        "cooldown lap",
+        "cooldown laps",
+        "out lap",
+        "out laps",
+        "compare qualifying runs",
+        "qualifying runs",
+        "run structure",
+    )
+    return any(keyword in query_lower for keyword in keywords)
 
 
 # Track API call timestamps for rate limit monitoring
@@ -448,16 +492,30 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
         # Ask Gemini to determine which tool to use
         prompt = f"""Analyze this F1 query and determine which tool to use:
             - get_f1_schedule(year) for schedule questions
-            - get_f1_results(year, race) for results questions
-            - get_driver_lap_times(year, race, driver_code) for lap time data (without plotting)
-            - plot_driver_lap_times(year, race, driver_code) for single driver lap time plots
-            - compare_driver_lap_times(year, race, driver_code1, driver_code2) for comparing two drivers' lap times
+            - get_f1_results(year, race, session_type) for results questions
+            - get_driver_lap_times(year, race, driver_code, session_type) for lap time data (without plotting)
+            - plot_driver_lap_times(year, race, driver_code, session_type) for single driver lap time plots
+            - compare_driver_lap_times(year, race, driver_code1, driver_code2, session_type) for comparing two drivers' lap times
+            - analyze_qualifying_runs(year, race, driver_code, session_type) for qualifying run structure, push laps, out laps, cooldown laps, or Q1/Q2/Q3 analysis
+            - compare_qualifying_runs(year, race, driver_code1, driver_code2, session_type) for qualifying run comparisons, push-lap comparisons, or Q1/Q2/Q3 qualifying comparisons
 
             Query: {query}
 
-            Respond in JSON: {{"tool": "tool_name", "year": 2024, "race": "race_name", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "VER"}}
+            Respond in JSON: {{"tool": "tool_name", "year": 2025, "race": "race_name", "session_type": "R", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "LEC"}}
             Extract year (default 2025), race name, and driver code(s) (3-letter code like VER, NOR, HAM) if needed.
-            For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2."""
+            Default session_type to "R" if not specified.
+            Infer session_type from the query:
+            - qualifying/quali/q1/q2/q3 -> "Q"
+            - sprint qualifying/sprint shootout -> "SQ"
+            - sprint -> "S"
+            - FP1/practice 1 -> "FP1"
+            - FP2/practice 2 -> "FP2"
+            - FP3/practice 3 -> "FP3"
+            - race/grand prix/results/won the race -> "R"
+            For qualifying requests mentioning push laps, flying laps, hot laps, cooldown laps, out laps, run structure, or Q1/Q2/Q3 progression, use the qualifying tools.
+            For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2 unless the request is specifically about qualifying runs or qualifying segments, in which case use compare_qualifying_runs.
+            For "lap times" without "plot" or "graph", use get_driver_lap_times.
+            For "plot" or "graph", use plot_driver_lap_times."""
 
         routing_response_text = _f1_generate_llm_text(
             use_local=use_local,
@@ -474,15 +532,26 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
         tool_name = decision.get("tool")
         year = decision.get("year", 2024)
         race = decision.get("race")
+        session_type = decision.get("session_type", "R")
         driver_code = decision.get("driver_code")
         driver_code1 = decision.get("driver_code1")
         driver_code2 = decision.get("driver_code2")
 
         _f1_trace(
             log,
-            f"Routing decision: tool={tool_name!r} year={year} race={race!r} "
+            f"Routing decision: tool={tool_name!r} year={year} race={race!r} session_type={session_type!r} "
             f"driver_code={driver_code!r} driver_code1={driver_code1!r} driver_code2={driver_code2!r}",
         )
+
+        if _is_qualifying_runs_query(query, session_type):
+            if driver_code1 and driver_code2:
+                tool_name = "compare_qualifying_runs"
+            elif driver_code:
+                tool_name = "analyze_qualifying_runs"
+            _f1_trace(log, f"Qualifying keyword override -> tool={tool_name!r}")
+        elif str(session_type or "").strip().upper() in {"Q", "SQ"} and tool_name == "compare_driver_lap_times":
+            tool_name = "compare_qualifying_runs"
+            _f1_trace(log, "Qualifying session override -> compare_qualifying_runs")
 
         # Call the appropriate tool
         if tool_name == "get_f1_schedule":
@@ -502,14 +571,26 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             if not race:
                 _f1_trace(log, "(validation) get_f1_results missing race")
                 return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
-            _f1_trace(log, f"Tool call: get_f1_results({year!r}, {race!r})")
-            result = get_f1_results(year, race)
+            _f1_trace(log, f"Tool call: get_f1_results({year!r}, {race!r}, session_type={session_type!r})")
+            result = get_f1_results(year, race, session_type=session_type)
             if "results" in result:
                 race_name = result.get("race", race)
-                summary_html = render_results_summary(query, year, race_name, result["results"])
-                table_html = render_results_table(year, race_name, result["results"])
+                normalized_session_type = result.get("session_type", session_type)
+                summary_html = render_results_summary(
+                    query,
+                    year,
+                    race_name,
+                    result["results"],
+                    session_type=normalized_session_type,
+                )
+                table_html = render_results_table(
+                    year,
+                    race_name,
+                    result["results"],
+                    session_type=normalized_session_type,
+                )
                 html = summary_html + table_html
-                _f1_trace(log, f"get_f1_results OK ({len(result['results'])} rows)")
+                _f1_trace(log, f"get_f1_results OK ({len(result['results'])} rows, session={normalized_session_type})")
                 return html
             else:
                 _f1_trace(log, f"get_f1_results error: {result.get('error', 'Unknown error')}")
@@ -521,15 +602,54 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             if not driver_code:
                 _f1_trace(log, "(validation) get_driver_lap_times missing driver_code")
                 return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
-            _f1_trace(log, f"Tool call: get_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r})")
-            result = get_driver_lap_times(year, race, driver_code.upper())
+            _f1_trace(
+                log,
+                f"Tool call: get_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r}, session_type={session_type!r})",
+            )
+            result = get_driver_lap_times(year, race, driver_code.upper(), session_type=session_type)
             if "lap_data" in result:
+                normalized_session_type = result.get("session_type", session_type)
+                heading = format_session_heading(
+                    f"Lap times - {driver_code.upper()}",
+                    year=year,
+                    race=race,
+                    session_type=normalized_session_type,
+                )
                 table_html = render_lap_times_table(result["lap_data"], include_seconds=True)
-                _f1_trace(log, f"get_driver_lap_times OK ({len(result['lap_data'])} laps)")
-                return table_html
+                _f1_trace(
+                    log,
+                    f"get_driver_lap_times OK ({len(result['lap_data'])} laps, session={normalized_session_type})",
+                )
+                return f"<h2>{heading}</h2>{table_html}"
             else:
                 _f1_trace(log, f"get_driver_lap_times error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+        elif tool_name == "analyze_qualifying_runs":
+            if not race:
+                _f1_trace(log, "(validation) analyze_qualifying_runs missing race")
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code:
+                _f1_trace(log, "(validation) analyze_qualifying_runs missing driver_code")
+                return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
+            _f1_trace(
+                log,
+                f"Tool call: analyze_qualifying_runs({year!r}, {race!r}, {driver_code.upper()!r}, session_type={session_type!r})",
+            )
+            result = analyze_qualifying_runs(year, race, driver_code.upper(), session_type=session_type)
+            if "error" in result:
+                _f1_trace(log, f"analyze_qualifying_runs error: {result.get('error', 'Unknown error')}")
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+            normalized_session_type = result.get("session_type", session_type)
+            heading = format_session_heading(
+                f"Qualifying runs - {driver_code.upper()}",
+                year=year,
+                race=race,
+                session_type=normalized_session_type,
+            )
+            _f1_trace(log, f"analyze_qualifying_runs OK ({len(result.get('segments', []))} segments)")
+            plot_html = render_qualifying_runs_plot(year, race, driver_code.upper(), result)
+            prose_html = render_qualifying_runs_prose(result)
+            return f"<h2>{heading}</h2>{plot_html}{prose_html}{render_qualifying_runs_sections(result)}"
         elif tool_name == "plot_driver_lap_times":
             if not race:
                 _f1_trace(log, "(validation) plot_driver_lap_times missing race")
@@ -537,23 +657,63 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             if not driver_code:
                 _f1_trace(log, "(validation) plot_driver_lap_times missing driver_code")
                 return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
-            _f1_trace(log, f"Tool call: plot_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r})")
-            result = plot_driver_lap_times(year, race, driver_code.upper())
+            _f1_trace(
+                log,
+                f"Tool call: plot_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r}, session_type={session_type!r})",
+            )
+            result = plot_driver_lap_times(year, race, driver_code.upper(), session_type=session_type)
             if "plot_html" in result:
-                # Return HTML with plot and table
+                normalized_session_type = result.get("session_type", session_type)
+                heading = format_session_heading(
+                    f"Lap times - {driver_code.upper()}",
+                    year=year,
+                    race=race,
+                    session_type=normalized_session_type,
+                )
                 plot_html = result["plot_html"]
-                
-                # Create table HTML from lap data
+
                 if "lap_data" in result and result["lap_data"]:
                     table_html = render_lap_times_table(result["lap_data"], include_seconds=False)
-                    _f1_trace(log, "plot_driver_lap_times OK (plot + table)")
-                    return plot_html + table_html
+                    _f1_trace(log, f"plot_driver_lap_times OK (plot + table, session={normalized_session_type})")
+                    return f"<h2>{heading}</h2><p class='opacity-75'>{format_session_context(normalized_session_type).title()}</p>" + plot_html + table_html
                 else:
-                    _f1_trace(log, "plot_driver_lap_times OK (plot only)")
-                    return plot_html
+                    _f1_trace(log, f"plot_driver_lap_times OK (plot only, session={normalized_session_type})")
+                    return f"<h2>{heading}</h2>{plot_html}"
             else:
                 _f1_trace(log, f"plot_driver_lap_times error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+        elif tool_name == "compare_qualifying_runs":
+            if not race:
+                _f1_trace(log, "(validation) compare_qualifying_runs missing race")
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code1 or not driver_code2:
+                _f1_trace(log, "(validation) compare_qualifying_runs missing driver pair")
+                return "<p>Error: Two driver codes required. Please specify both drivers (e.g., HAM and VER).</p>"
+            _f1_trace(
+                log,
+                f"Tool call: compare_qualifying_runs({year!r}, {race!r}, {driver_code1.upper()!r}, {driver_code2.upper()!r}, session_type={session_type!r})",
+            )
+            result = compare_qualifying_runs(
+                year,
+                race,
+                driver_code1.upper(),
+                driver_code2.upper(),
+                session_type=session_type,
+            )
+            if "error" in result:
+                _f1_trace(log, f"compare_qualifying_runs error: {result.get('error', 'Unknown error')}")
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+            normalized_session_type = result.get("session_type", session_type)
+            heading = format_session_heading(
+                f"Qualifying comparison - {driver_code1.upper()} vs {driver_code2.upper()}",
+                year=year,
+                race=race,
+                session_type=normalized_session_type,
+            )
+            _f1_trace(log, f"compare_qualifying_runs OK ({len(result.get('segments', []))} segments)")
+            plot_html = render_qualifying_comparison_plot(year, race, result)
+            prose_html = render_qualifying_comparison_prose(result)
+            return f"<h2>{heading}</h2>{plot_html}{prose_html}{render_qualifying_comparison_sections(result)}"
         elif tool_name == "compare_driver_lap_times":
             if not race:
                 _f1_trace(log, "(validation) compare_driver_lap_times missing race")
@@ -566,9 +726,15 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             _f1_trace(
                 log,
                 f"Tool call: compare_driver_lap_times({year!r}, {race!r}, "
-                f"{driver_code1.upper()!r}, {driver_code2.upper()!r})",
+                f"{driver_code1.upper()!r}, {driver_code2.upper()!r}, session_type={session_type!r})",
             )
-            result = compare_driver_lap_times(year, race, driver_code1.upper(), driver_code2.upper())
+            result = compare_driver_lap_times(
+                year,
+                race,
+                driver_code1.upper(),
+                driver_code2.upper(),
+                session_type=session_type,
+            )
             
             if "error" in result:
                 _f1_trace(log, f"compare_driver_lap_times error: {result.get('error', 'Unknown error')}")
@@ -578,8 +744,16 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
                 _f1_trace(log, "compare_driver_lap_times: missing plot_html")
                 return f"<p>Error: Failed to generate comparison plot.</p>"
             
-            plot_html = result["plot_html"]
+            normalized_session_type = result.get("session_type", session_type)
+            comparison_heading = format_session_heading(
+                f"Driver comparison - {driver_code1.upper()} vs {driver_code2.upper()}",
+                year=year,
+                race=race,
+                session_type=normalized_session_type,
+            )
+            plot_html = f"<h2>{comparison_heading}</h2>{result['plot_html']}"
             comparison_summary = result.get("comparison_summary", {})
+            comparison_summary["session_type"] = normalized_session_type
             analysis_prompt = build_comparison_analysis_prompt(
                 year,
                 race,
@@ -608,7 +782,7 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
                 _f1_trace(log, f"Analysis LLM failed: {e}")
 
             # Combine plot and analysis
-            _f1_trace(log, "compare_driver_lap_times flow complete")
+            _f1_trace(log, f"compare_driver_lap_times flow complete (session={normalized_session_type})")
             return plot_html + analysis_section
         else:
             _f1_trace(log, f"Unknown tool name from model: {tool_name!r}")

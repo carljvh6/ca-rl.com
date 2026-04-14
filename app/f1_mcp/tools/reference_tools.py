@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from f1_mcp.providers.schedule_provider import get_schedule_df
-from f1_mcp.providers.session_provider import load_session
+from f1_mcp.providers.session_provider import load_session, normalize_session_type
 from f1_mcp.schemas.session_models import ScheduleEntry
 
 logger = logging.getLogger("f1_mcp_server")
@@ -15,7 +15,8 @@ def get_f1_results(year: int, race: str, session_type: str = "R") -> dict:
     """Get F1 session results while preserving the current race-results payload shape."""
     logger.info("Getting F1 results for %s - %s (%s)", year, race, session_type)
     try:
-        session = load_session(year, race, session_type)
+        normalized_session_type = normalize_session_type(session_type)
+        session = load_session(year, race, normalized_session_type)
         if not hasattr(session, "results") or session.results is None or session.results.empty:
             return {"error": f"No race data available for {year} - {race}"}
 
@@ -25,7 +26,12 @@ def get_f1_results(year: int, race: str, session_type: str = "R") -> dict:
         for col in ("Time", "Status"):
             if col in df.columns:
                 df[col] = df[col].astype(str)
-        return {"year": year, "race": race, "results": df.to_dict("records")}
+        return {
+            "year": year,
+            "race": race,
+            "session_type": normalized_session_type,
+            "results": df.to_dict("records"),
+        }
     except Exception as exc:
         logger.error("Error getting F1 results: %s", exc)
         return {"error": str(exc)}
