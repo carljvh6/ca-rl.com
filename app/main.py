@@ -26,7 +26,36 @@ from f1_mcp.rendering.html_sections import (
     build_comparison_analysis_prompt,
     render_comparison_analysis_section,
     render_lap_times_table,
+    render_results_summary,
+    render_results_table,
 )
+
+example_prompts = {
+    "Schedules": [
+        "What is the F1 schedule for 2025?",
+        "Show me the 2026 Formula 1 race calendar",
+    ],
+    "Results": [
+        "What were the results of the 2025 Bahrain Grand Prix?",
+        "Who finished on the podium in Monza 2025?",
+    ],
+    "Driver analysis": [
+        "Show me Lewis Hamilton's lap times in the 2025 British Grand Prix",
+        "Plot Charles Leclerc's lap times for Monza 2025",
+    ],
+    "Driver comparisons": [
+        "Compare Verstappen and Norris in Bahrain 2025",
+        "Compare Hamilton and Russell lap times at Silverstone 2025",
+    ],
+    "Advanced analysis": [
+        "Compare Norris and Leclerc in qualifying at Monza 2025",
+        "Analyze Verstappen's stints in Bahrain 2025",
+        "Compare the stints of Norris and Piastri in Miami 2025",
+        "Show Verstappen's FP2 lap times in Bahrain 2025",
+        "Who won the 2026 Australian Grand Prix and what was the gap to P2?",
+        "Compare qualifying lap times for Verstappen and Leclerc at the 2026 Japanese Grand Prix",
+    ],
+}
 
 f1_mcp_log_ctx: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "f1_mcp_log_ctx", default=None
@@ -43,14 +72,15 @@ class _F1MCPContextLogHandler(logging.Handler):
                 pass
 
 
-_f1_mcp_py_logger = logging.getLogger("f1_mcp_server")
 _f1_mcp_ctx_handler = _F1MCPContextLogHandler()
 _f1_mcp_ctx_handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 )
-if not any(isinstance(h, _F1MCPContextLogHandler) for h in _f1_mcp_py_logger.handlers):
-    _f1_mcp_py_logger.addHandler(_f1_mcp_ctx_handler)
-    _f1_mcp_py_logger.setLevel(logging.INFO)
+for _logger_name in ("f1_mcp_server", "f1_mcp"):
+    _f1_mcp_py_logger = logging.getLogger(_logger_name)
+    if not any(isinstance(h, _F1MCPContextLogHandler) for h in _f1_mcp_py_logger.handlers):
+        _f1_mcp_py_logger.addHandler(_f1_mcp_ctx_handler)
+        _f1_mcp_py_logger.setLevel(logging.INFO)
 
 
 def _f1_trace(log: list[str], message: str) -> None:
@@ -99,6 +129,25 @@ daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
     Script(src='https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'),
     Script("document.documentElement.setAttribute('data-theme', 'dark');"),
+    Style("""
+        @keyframes hourglass-spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hourglass-loader {
+            display: inline-block;
+            animation: hourglass-spin 1s linear infinite;
+        }
+        .htmx-indicator {
+            opacity: 0;
+            transition: opacity 200ms ease-in;
+            pointer-events: none;
+        }
+        .htmx-request .htmx-indicator,
+        .htmx-request.htmx-indicator {
+            opacity: 1;
+        }
+    """),
     Script("""
         document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('.menu-toggle').forEach(function(toggle) {
@@ -402,10 +451,10 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
             _f1_trace(log, f"Tool call: get_f1_results({year!r}, {race!r})")
             result = get_f1_results(year, race)
             if "results" in result:
-                html = f"<h2>{result.get('race')} {year} Results</h2><table class='table'><thead><tr><th>Pos</th><th>Driver</th><th>Team</th></tr></thead><tbody>"
-                for r in result["results"][:10]:
-                    html += f"<tr><td>{int(r.get('Position', 0))}</td><td>{r.get('BroadcastName')}</td><td>{r.get('TeamName')}</td></tr>"
-                html += "</tbody></table>"
+                race_name = result.get("race", race)
+                summary_html = render_results_summary(query, year, race_name, result["results"])
+                table_html = render_results_table(year, race_name, result["results"])
+                html = summary_html + table_html
                 _f1_trace(log, f"get_f1_results OK ({len(result['results'])} rows)")
                 return html
             else:
@@ -556,13 +605,109 @@ def get():
 
 @rt('/f1_mcp')
 def get():
+    categories = sorted(example_prompts.keys())
+    prompts_json = json.dumps(example_prompts)
     return layout(Div(
         H1('Welcome to the F1 MCP section!', cls='text-3xl'), 
         Form(
-            Input(type='text', id='query', name='query', placeholder='Ask a F1 related question'),
-            Button('Send', hx_post="/f1_mcp_res", hx_target='#dest'),
-            Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
-        ),
+            Input(
+                type='text',
+                id='query',
+                name='query',
+                placeholder='Ask any F1 question...',
+                cls='input input-bordered w-full'
+            ),
+            Div(
+                H3('Need ideas?', cls='text-sm font-medium'),
+                P(
+                    'Pick a category and we will prefill a sample question.',
+                    cls='text-xs opacity-70'
+                ),
+                Div(
+                    Div(
+                        Label('Category', fr='prompt_category', cls='text-xs uppercase tracking-wide opacity-70'),
+                        Select(
+                            Option('Choose a category', value=''),
+                            *[Option(category, value=category) for category in categories],
+                            id='prompt_category',
+                            cls='select select-bordered w-full text-base leading-normal min-h-12'
+                        ),
+                        cls='flex flex-col gap-1'
+                    ),
+                    Div(
+                        Label('Example prompt', fr='example_prompt', cls='text-xs uppercase tracking-wide opacity-70'),
+                        Select(
+                            Option('Select a category first', value=''),
+                            id='example_prompt',
+                            cls='select select-bordered w-full text-base leading-normal min-h-12',
+                            disabled=True
+                        ),
+                        cls='flex flex-col gap-1'
+                    ),
+                    cls='grid gap-3 md:grid-cols-2'
+                ),
+                cls='rounded-xl border border-base-300 bg-base-200/40 p-4 flex flex-col gap-3'
+            ),
+            Div(
+                Button(
+                    'Send',
+                    cls='btn-primary w-fit',
+                    hx_post="/f1_mcp_res",
+                    hx_target='#dest',
+                    hx_indicator='#loading-f1'
+                ),
+                Span('⏳', id='loading-f1', cls='hourglass-loader htmx-indicator text-xl'),
+                cls='flex items-center gap-2'
+            ),
+            Div(id='dest', cls='mt-4 prose prose-invert max-w-none'),
+            Script(f"""
+                (() => {{
+                    const promptMap = {prompts_json};
+                    const categorySelect = document.getElementById('prompt_category');
+                    const promptSelect = document.getElementById('example_prompt');
+                    const queryInput = document.getElementById('query');
+                    if (!categorySelect || !promptSelect || !queryInput) return;
+
+                    function resetPrompts(placeholderText) {{
+                        promptSelect.innerHTML = '';
+                        const placeholder = document.createElement('option');
+                        placeholder.value = '';
+                        placeholder.textContent = placeholderText;
+                        promptSelect.appendChild(placeholder);
+                    }}
+
+                    categorySelect.addEventListener('change', () => {{
+                        const selectedCategory = categorySelect.value;
+                        if (!selectedCategory || !promptMap[selectedCategory]) {{
+                            promptSelect.disabled = true;
+                            resetPrompts('Select a category first');
+                            return;
+                        }}
+
+                        promptSelect.disabled = false;
+                        resetPrompts('Choose an example prompt');
+                        promptMap[selectedCategory].forEach((prompt) => {{
+                            const option = document.createElement('option');
+                            option.value = prompt;
+                            option.textContent = prompt;
+                            promptSelect.appendChild(option);
+                        }});
+                        if (promptMap[selectedCategory].length > 0) {{
+                            promptSelect.selectedIndex = 1;
+                            queryInput.value = promptMap[selectedCategory][0];
+                        }}
+                    }});
+
+                    promptSelect.addEventListener('change', () => {{
+                        const selectedPrompt = promptSelect.value;
+                        if (!selectedPrompt) return;
+                        queryInput.value = selectedPrompt;
+                        queryInput.focus();
+                        queryInput.setSelectionRange(queryInput.value.length, queryInput.value.length);
+                    }});
+                }})();
+            """)
+        , cls='flex flex-col gap-4 mt-4'),
         cls='flex flex-col gap-2 p-4'
     ))
 

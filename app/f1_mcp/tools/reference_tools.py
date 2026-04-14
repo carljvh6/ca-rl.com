@@ -19,8 +19,12 @@ def get_f1_results(year: int, race: str, session_type: str = "R") -> dict:
         if not hasattr(session, "results") or session.results is None or session.results.empty:
             return {"error": f"No race data available for {year} - {race}"}
 
-        cls = ["BroadcastName", "TeamName", "Position"]
-        df = session.results[cls].sort_values(by="Position", ascending=True)
+        preferred_cols = ["BroadcastName", "TeamName", "Position", "Time", "Status"]
+        cls = [col for col in preferred_cols if col in session.results.columns]
+        df = session.results[cls].sort_values(by="Position", ascending=True).copy()
+        for col in ("Time", "Status"):
+            if col in df.columns:
+                df[col] = df[col].astype(str)
         return {"year": year, "race": race, "results": df.to_dict("records")}
     except Exception as exc:
         logger.error("Error getting F1 results: %s", exc)
