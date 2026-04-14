@@ -8,6 +8,9 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 import markdown
 import json
+import contextvars
+import html as html_lib
+import logging
 import sys
 import os
 from datetime import datetime
@@ -19,6 +22,53 @@ if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
 from f1_mcp_server import get_f1_results, get_f1_schedule, get_driver_lap_times, plot_driver_lap_times, compare_driver_lap_times
+
+f1_mcp_log_ctx: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "f1_mcp_log_ctx", default=None
+)
+
+
+class _F1MCPContextLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        buf = f1_mcp_log_ctx.get()
+        if buf is not None:
+            try:
+                buf.append(self.format(record))
+            except Exception:
+                pass
+
+
+_f1_mcp_py_logger = logging.getLogger("f1_mcp_server")
+_f1_mcp_ctx_handler = _F1MCPContextLogHandler()
+_f1_mcp_ctx_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+)
+if not any(isinstance(h, _F1MCPContextLogHandler) for h in _f1_mcp_py_logger.handlers):
+    _f1_mcp_py_logger.addHandler(_f1_mcp_ctx_handler)
+    _f1_mcp_py_logger.setLevel(logging.INFO)
+
+
+def _f1_trace(log: list[str], message: str) -> None:
+    log.append(f"{datetime.now().strftime('%H:%M:%S')} {message}")
+
+
+def _f1_response_with_logs(content_html: str, log_lines: list[str]) -> str:
+    body = (
+        "(no log entries for this response)"
+        if not log_lines
+        else html_lib.escape("\n".join(log_lines))
+    )
+    panel = (
+        '<details class="mt-6 border border-base-300 rounded-lg bg-base-200/40">'
+        '<summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium hover:bg-base-300/30 rounded-lg">'
+        "Agent &amp; tool logs"
+        "</summary>"
+        '<div class="px-3 pb-3">'
+        '<pre class="text-xs whitespace-pre-wrap break-words max-h-96 overflow-y-auto bg-base-300/50 rounded p-3 m-0 font-mono">'
+        f"{body}</pre></div></details>"
+    )
+    return content_html + panel
+
 
 # Track API call timestamps for rate limit monitoring
 api_call_times = deque(maxlen=100)
@@ -44,28 +94,6 @@ daisy_headers = (
     Link(href='https://cdn.jsdelivr.net/npm/daisyui@5', rel='stylesheet', type='text/css'),
     Script(src='https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'),
     Script("document.documentElement.setAttribute('data-theme', 'dark');"),
-    Style("""
-        @keyframes hourglass-spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .hourglass-loader {
-            display: inline-block;
-            font-size: 1.5rem;
-            animation: hourglass-spin 1s linear infinite;
-        }
-        .htmx-indicator {
-            opacity: 0;
-            transition: opacity 200ms ease-in;
-            pointer-events: none;
-        }
-        .htmx-request .htmx-indicator {
-            opacity: 1;
-        }
-        .htmx-request.htmx-indicator {
-            opacity: 1;
-        }
-    """),
     Script("""
         document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('.menu-toggle').forEach(function(toggle) {
@@ -93,10 +121,6 @@ daisy_headers = (
 
 def Button(*c, cls='', **kw):
     return fc.Button(*c, cls=f"btn {cls}", **kw)
-
-def HourglassLoader(cls='', **kw):
-    """Create a spinning hourglass loading indicator"""
-    return Span('⏳', cls=f'hourglass-loader htmx-indicator {cls}', **kw)
 
 def get_api_key(use_secret_manager=None):
     """
@@ -291,15 +315,21 @@ def chatbot_res(message:str):
     except Exception as e:
         return f"Error: {str(e)}"
 
-@rt
-def f1_mcp_res(query: str):
-    """Process F1 queries using MCP tools with Gemini for natural language understanding"""
+def _f1_mcp_res_run(query: str, log: list[str]) -> str:
+    """Process F1 queries using MCP tools with Gemini for natural language understanding."""
     try:
         if not query or not query.strip():
+            _f1_trace(log, "(validation) empty query")
             return "<p>Please enter a question.</p>"
-        
+
+        qdisp = query.strip()
+        if len(qdisp) > 240:
+            qdisp = qdisp[:240] + "…"
+        _f1_trace(log, f"Query: {qdisp}")
+
         api_key = get_api_key(use_secret_manager=True)
         if not api_key:
+            _f1_trace(log, "(validation) missing API key")
             return "<p>Error: API key not configured. Please set GOOGLE_API_KEY environment variable.</p>"
         client = genai.Client(api_key=api_key)
         
@@ -318,12 +348,13 @@ def f1_mcp_res(query: str):
             For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2."""
         
         log_api_call("F1 MCP", "gemini-2.0-flash-lite", prompt)
-        
+        _f1_trace(log, "Gemini routing: request sent (gemini-2.5-flash-lite)")
+
         response = client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
-        
+
         # Parse Gemini's response
         response_text = response.text.strip()
         if "```json" in response_text:
@@ -338,35 +369,51 @@ def f1_mcp_res(query: str):
         driver_code = decision.get("driver_code")
         driver_code1 = decision.get("driver_code1")
         driver_code2 = decision.get("driver_code2")
-        
+
+        _f1_trace(
+            log,
+            f"Routing decision: tool={tool_name!r} year={year} race={race!r} "
+            f"driver_code={driver_code!r} driver_code1={driver_code1!r} driver_code2={driver_code2!r}",
+        )
+
         # Call the appropriate tool
         if tool_name == "get_f1_schedule":
+            _f1_trace(log, f"Tool call: get_f1_schedule({year})")
             result = get_f1_schedule(year)
             if "schedule" in result:
                 html = f"<h2>F1 Schedule {year}</h2><ul>"
                 for r in result["schedule"][:10]:
                     html += f"<li><strong>Round {r.get('RoundNumber')}:</strong> {r.get('EventName')} - {r.get('Location')}, {r.get('Country')} ({r.get('EventDate')})</li>"
                 html += "</ul>"
+                _f1_trace(log, f"get_f1_schedule OK ({len(result['schedule'])} events)")
                 return html
             else:
+                _f1_trace(log, f"get_f1_schedule error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
         elif tool_name == "get_f1_results":
             if not race:
+                _f1_trace(log, "(validation) get_f1_results missing race")
                 return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            _f1_trace(log, f"Tool call: get_f1_results({year!r}, {race!r})")
             result = get_f1_results(year, race)
             if "results" in result:
                 html = f"<h2>{result.get('race')} {year} Results</h2><table class='table'><thead><tr><th>Pos</th><th>Driver</th><th>Team</th></tr></thead><tbody>"
                 for r in result["results"][:10]:
                     html += f"<tr><td>{int(r.get('Position', 0))}</td><td>{r.get('BroadcastName')}</td><td>{r.get('TeamName')}</td></tr>"
                 html += "</tbody></table>"
+                _f1_trace(log, f"get_f1_results OK ({len(result['results'])} rows)")
                 return html
             else:
+                _f1_trace(log, f"get_f1_results error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
         elif tool_name == "get_driver_lap_times":
             if not race:
+                _f1_trace(log, "(validation) get_driver_lap_times missing race")
                 return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
             if not driver_code:
+                _f1_trace(log, "(validation) get_driver_lap_times missing driver_code")
                 return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
+            _f1_trace(log, f"Tool call: get_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r})")
             result = get_driver_lap_times(year, race, driver_code.upper())
             if "lap_data" in result:
                 # Create table HTML from lap data
@@ -378,14 +425,19 @@ def f1_mcp_res(query: str):
                     compound = lap.get('Compound', '')
                     table_html += f"<tr><td>{lap_num}</td><td>{lap_time}</td><td>{lap_time_seconds:.3f}</td><td>{compound}</td></tr>"
                 table_html += "</tbody></table></div>"
+                _f1_trace(log, f"get_driver_lap_times OK ({len(result['lap_data'])} laps)")
                 return table_html
             else:
+                _f1_trace(log, f"get_driver_lap_times error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
         elif tool_name == "plot_driver_lap_times":
             if not race:
+                _f1_trace(log, "(validation) plot_driver_lap_times missing race")
                 return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
             if not driver_code:
+                _f1_trace(log, "(validation) plot_driver_lap_times missing driver_code")
                 return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
+            _f1_trace(log, f"Tool call: plot_driver_lap_times({year!r}, {race!r}, {driver_code.upper()!r})")
             result = plot_driver_lap_times(year, race, driver_code.upper())
             if "plot_html" in result:
                 # Return HTML with plot and table
@@ -400,24 +452,36 @@ def f1_mcp_res(query: str):
                         compound = lap.get('Compound', '')
                         table_html += f"<tr><td>{lap_num}</td><td>{lap_time}</td><td>{compound}</td></tr>"
                     table_html += "</tbody></table></div>"
+                    _f1_trace(log, "plot_driver_lap_times OK (plot + table)")
                     return plot_html + table_html
                 else:
+                    _f1_trace(log, "plot_driver_lap_times OK (plot only)")
                     return plot_html
             else:
+                _f1_trace(log, f"plot_driver_lap_times error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
         elif tool_name == "compare_driver_lap_times":
             if not race:
+                _f1_trace(log, "(validation) compare_driver_lap_times missing race")
                 return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
             if not driver_code1 or not driver_code2:
+                _f1_trace(log, "(validation) compare_driver_lap_times missing driver pair")
                 return "<p>Error: Two driver codes required. Please specify both drivers (e.g., HAM and VER).</p>"
-            
+
             # Get comparison data and plot
+            _f1_trace(
+                log,
+                f"Tool call: compare_driver_lap_times({year!r}, {race!r}, "
+                f"{driver_code1.upper()!r}, {driver_code2.upper()!r})",
+            )
             result = compare_driver_lap_times(year, race, driver_code1.upper(), driver_code2.upper())
             
             if "error" in result:
+                _f1_trace(log, f"compare_driver_lap_times error: {result.get('error', 'Unknown error')}")
                 return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
-            
+
             if "plot_html" not in result:
+                _f1_trace(log, "compare_driver_lap_times: missing plot_html")
                 return f"<p>Error: Failed to generate comparison plot.</p>"
             
             plot_html = result["plot_html"]
@@ -507,7 +571,8 @@ def f1_mcp_res(query: str):
                 Write in a clear, informative style suitable for F1 fans. Pay special attention to how pit stops affected lap times and race strategy."""
             
             log_api_call("F1 MCP Analysis", "gemini-2.5-flash-lite", analysis_prompt[:200])
-            
+            _f1_trace(log, "Gemini analysis: request sent (gemini-2.5-flash-lite)")
+
             # Get LLM analysis
             try:
                 analysis_response = client.models.generate_content(
@@ -515,33 +580,45 @@ def f1_mcp_res(query: str):
                     contents=analysis_prompt
                 )
                 analysis_text = analysis_response.text
-                
+
                 # Convert markdown to HTML
                 analysis_html = markdown.markdown(analysis_text, extensions=['nl2br', 'fenced_code'])
                 analysis_section = f"<div class='mt-8 prose prose-invert max-w-none'><h3 class='text-2xl mb-4'>Analysis</h3>{analysis_html}</div>"
+                _f1_trace(log, f"Gemini analysis OK ({len(analysis_text)} chars)")
             except Exception as e:
                 analysis_section = f"<div class='mt-8'><p class='text-red-400'>Error generating analysis: {str(e)}</p></div>"
-            
+                _f1_trace(log, f"Gemini analysis failed: {e}")
+
             # Combine plot and analysis
+            _f1_trace(log, "compare_driver_lap_times flow complete")
             return plot_html + analysis_section
         else:
+            _f1_trace(log, f"Unknown tool name from model: {tool_name!r}")
             return f"<p>Error: Unknown tool '{tool_name}'</p>"
     except json.JSONDecodeError as e:
+        _f1_trace(log, f"JSON parse error: {e}")
         return f"<p>Error parsing Gemini response: {str(e)}<br>Response was: {response.text[:200]}</p>"
     except Exception as e:
         import traceback
+        _f1_trace(log, f"Unhandled exception: {e}\n{traceback.format_exc()}")
         return f"<p>Error: {str(e)}<br><pre>{traceback.format_exc()}</pre></p>"
+
+
+@rt
+def f1_mcp_res(query: str):
+    log_buf: list[str] = []
+    token = f1_mcp_log_ctx.set(log_buf)
+    try:
+        return _f1_response_with_logs(_f1_mcp_res_run(query, log_buf), log_buf)
+    finally:
+        f1_mcp_log_ctx.reset(token)
 
 @rt('/')
 def get(): 
     return layout(Form(
         H1('Welcome to the playground!', cls='text-3xl'), 
         Input(type='text', id='nm', placeholder='Enter your name'),
-        Div(
-            Button('Click me', hx_post="/btn_res", hx_target='#dest', hx_indicator='#loading-home'),
-            HourglassLoader(cls='ml-2', id='loading-home'),
-            cls='flex items-center'
-        ),
+        Button('Click me', hx_post="/btn_res", hx_target='#dest'),
         P(id='dest', cls='mt-4')
     ))
 
@@ -557,11 +634,7 @@ def get():
         H1('Welcome to the chatbot!', cls='text-3xl'), 
         Form(
             Input(type='text', id='message', placeholder='Ask you question to the chatbot'),
-            Div(
-                Button('Send', hx_post="/chatbot_res", hx_target='#dest', hx_indicator='#loading-chatbot'),
-                HourglassLoader(cls='ml-2', id='loading-chatbot'),
-                cls='flex items-center'
-            ),
+            Button('Send', hx_post="/chatbot_res", hx_target='#dest'),
             Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
         ),
         cls='flex flex-col gap-2 p-4'
@@ -573,11 +646,7 @@ def get():
         H1('Welcome to the F1 MCP section!', cls='text-3xl'), 
         Form(
             Input(type='text', id='query', name='query', placeholder='Ask a F1 related question'),
-            Div(
-                Button('Send', hx_post="/f1_mcp_res", hx_target='#dest', hx_indicator='#loading-f1'),
-                HourglassLoader(cls='ml-2', id='loading-f1'),
-                cls='flex items-center'
-            ),
+            Button('Send', hx_post="/f1_mcp_res", hx_target='#dest'),
             Div(id='dest', cls='mt-4 prose prose-invert max-w-none')
         ),
         cls='flex flex-col gap-2 p-4'

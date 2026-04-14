@@ -50,3 +50,6 @@ app/__init__.py
 
 ravin_mcp/
 assets/
+nedbank_chroma/
+docker-compose.yml
+docker-test.sh

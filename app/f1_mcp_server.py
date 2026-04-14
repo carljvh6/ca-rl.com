@@ -1,5 +1,7 @@
 import logging
 from mcp.server.fastmcp import FastMCP
+
+logger = logging.getLogger(__name__)
 import fastf1
 import pandas as pd
 import matplotlib
@@ -22,7 +24,7 @@ def get_f1_results(year: int, race: str) -> dict:
     Returns:
         Dictionary with race results including driver names, teams, and positions
     """
-    logging.info(f"Getting F1 results for {year} - {race}")
+    logger.info(f"Getting F1 results for {year} - {race}")
     try:
         session = fastf1.get_session(year, race, 'R')
         session.load()
@@ -41,7 +43,7 @@ def get_f1_results(year: int, race: str) -> dict:
             "results": results
         }
     except Exception as e:
-        logging.error(f"Error getting F1 results: {e}")
+        logger.error(f"Error getting F1 results: {e}")
         return {"error": str(e)}
 
 
@@ -56,7 +58,7 @@ def get_f1_schedule(year: int) -> dict:
     Returns:
         Dictionary with the race schedule including race names, dates, and locations
     """
-    logging.info(f"Getting F1 schedule for {year}")
+    logger.info(f"Getting F1 schedule for {year}")
     try:
         schedule = fastf1.get_event_schedule(year)
         
@@ -79,7 +81,7 @@ def get_f1_schedule(year: int) -> dict:
             "schedule": schedule_list
         }
     except Exception as e:
-        logging.error(f"Error getting F1 schedule: {e}")
+        logger.error(f"Error getting F1 schedule: {e}")
         return {"error": str(e)}
 
 
@@ -96,7 +98,7 @@ def get_driver_lap_times(year: int, race: str, driver_code: str) -> dict:
     Returns:
         Dictionary with lap times data including lap numbers, lap times, and tire compounds
     """
-    logging.info(f"Getting lap times for {driver_code} in {year} - {race}")
+    logger.info(f"Getting lap times for {driver_code} in {year} - {race}")
     try:
         session = fastf1.get_session(year, race, 'R')
         session.load()
@@ -146,7 +148,7 @@ def get_driver_lap_times(year: int, race: str, driver_code: str) -> dict:
             "lap_data": lap_records
         }
     except Exception as e:
-        logging.error(f"Error getting lap times: {e}")
+        logger.error(f"Error getting lap times: {e}")
         return {"error": str(e)}
 
 
@@ -163,7 +165,7 @@ def plot_driver_lap_times(year: int, race: str, driver_code: str) -> dict:
     Returns:
         Dictionary with plot HTML and metadata
     """
-    logging.info(f"Plotting lap times for {driver_code} in {year} - {race}")
+    logger.info(f"Plotting lap times for {driver_code} in {year} - {race}")
     try:
         # Get lap times data using the separate function
         lap_times_result = get_driver_lap_times(year, race, driver_code)
@@ -234,7 +236,7 @@ def plot_driver_lap_times(year: int, race: str, driver_code: str) -> dict:
             "lap_data": lap_data
         }
     except Exception as e:
-        logging.error(f"Error plotting lap times: {e}")
+        logger.error(f"Error plotting lap times: {e}")
         return {"error": str(e)}
 
 
@@ -253,7 +255,7 @@ def compare_driver_lap_times(year: int, race: str, driver_code1: str, driver_cod
     Returns:
         Dictionary with comparison plot HTML and lap data for both drivers
     """
-    logging.info(f"Comparing lap times for {driver_code1} vs {driver_code2} in {year} - {race}")
+    logger.info(f"Comparing lap times for {driver_code1} vs {driver_code2} in {year} - {race}")
     try:
         # Get lap times for both drivers
         driver1_result = get_driver_lap_times(year, race, driver_code1)
@@ -368,7 +370,7 @@ def compare_driver_lap_times(year: int, race: str, driver_code1: str, driver_cod
             "driver2_lap_data": driver2_data
         }
     except Exception as e:
-        logging.error(f"Error comparing lap times: {e}")
+        logger.error(f"Error comparing lap times: {e}")
         return {"error": str(e)}
 
 
