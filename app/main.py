@@ -29,6 +29,7 @@ from f1_mcp.rendering.html_sections import (
     render_results_summary,
     render_results_table,
 )
+from f1_mcp.local_llm import get_local_llm_config, ollama_generate
 
 example_prompts = {
     "Schedules": [
@@ -103,6 +104,58 @@ def _f1_response_with_logs(content_html: str, log_lines: list[str]) -> str:
         f"{body}</pre></div></details>"
     )
     return content_html + panel
+
+
+_SYSTEM_JSON_ONLY = (
+    "You are a precise assistant. When the user asks for JSON only, respond with "
+    "a single JSON object and nothing else: no markdown, no code fences, no commentary."
+)
+_SYSTEM_PROSE = (
+    "You are a knowledgeable Formula 1 analyst. Write clear, accurate commentary. "
+    "Do not invent statistics or lap data."
+)
+
+
+def _f1_strip_json_blob(response_text: str) -> str:
+    response_text = (response_text or "").strip()
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0].strip()
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0].strip()
+    stripped = response_text.lstrip()
+    if not stripped.startswith("{"):
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            response_text = response_text[start : end + 1]
+    return response_text.strip()
+
+
+def _f1_generate_llm_text(
+    *,
+    use_local: bool,
+    client,
+    prompt: str,
+    log: list[str],
+    purpose: str,
+    context_label: str,
+    json_only: bool,
+) -> str:
+    if use_local:
+        base, model = get_local_llm_config()
+        _f1_trace(log, f"Local LLM ({model} @ {base}): {purpose}")
+        log_api_call(context_label, f"ollama:{model}", prompt[:400])
+        system = _SYSTEM_JSON_ONLY if json_only else _SYSTEM_PROSE
+        return ollama_generate(prompt, system=system)
+    if client is None:
+        raise RuntimeError("Gemini client is not configured")
+    _f1_trace(log, f"Gemini (gemini-2.5-flash-lite): {purpose}")
+    log_api_call(context_label, "gemini-2.5-flash-lite", prompt[:400])
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+    )
+    return (response.text or "").strip()
 
 
 # Track API call timestamps for rate limit monitoring
@@ -369,8 +422,9 @@ def chatbot_res(message:str):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def _f1_mcp_res_run(query: str, log: list[str]) -> str:
-    """Process F1 queries using MCP tools with Gemini for natural language understanding."""
+def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
+    """Process F1 queries using MCP tools with Gemini or a local Gemma (Ollama) for routing and narration."""
+    routing_response_text = ""
     try:
         if not query or not query.strip():
             _f1_trace(log, "(validation) empty query")
@@ -381,12 +435,16 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
             qdisp = qdisp[:240] + "…"
         _f1_trace(log, f"Query: {qdisp}")
 
-        api_key = get_api_key(use_secret_manager=True)
-        if not api_key:
-            _f1_trace(log, "(validation) missing API key")
-            return "<p>Error: API key not configured. Please set GOOGLE_API_KEY environment variable.</p>"
-        client = genai.Client(api_key=api_key)
-        
+        if use_local:
+            _f1_trace(log, "LLM backend: local Gemma (Ollama); Gemini API key not required for routing")
+            client = None
+        else:
+            api_key = get_api_key(use_secret_manager=True)
+            if not api_key:
+                _f1_trace(log, "(validation) missing API key")
+                return "<p>Error: API key not configured. Please set GOOGLE_API_KEY environment variable.</p>"
+            client = genai.Client(api_key=api_key)
+
         # Ask Gemini to determine which tool to use
         prompt = f"""Analyze this F1 query and determine which tool to use:
             - get_f1_schedule(year) for schedule questions
@@ -400,22 +458,18 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
             Respond in JSON: {{"tool": "tool_name", "year": 2024, "race": "race_name", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "VER"}}
             Extract year (default 2025), race name, and driver code(s) (3-letter code like VER, NOR, HAM) if needed.
             For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2."""
-        
-        log_api_call("F1 MCP", "gemini-2.0-flash-lite", prompt)
-        _f1_trace(log, "Gemini routing: request sent (gemini-2.5-flash-lite)")
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
+        routing_response_text = _f1_generate_llm_text(
+            use_local=use_local,
+            client=client,
+            prompt=prompt,
+            log=log,
+            purpose="tool routing",
+            context_label="F1 MCP",
+            json_only=True,
         )
+        response_text = _f1_strip_json_blob(routing_response_text)
 
-        # Parse Gemini's response
-        response_text = response.text.strip()
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-        
         decision = json.loads(response_text)
         tool_name = decision.get("tool")
         year = decision.get("year", 2024)
@@ -535,22 +589,23 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
                 query,
             )
             
-            log_api_call("F1 MCP Analysis", "gemini-2.5-flash-lite", analysis_prompt[:200])
-            _f1_trace(log, "Gemini analysis: request sent (gemini-2.5-flash-lite)")
-
             # Get LLM analysis
             try:
-                analysis_response = client.models.generate_content(
-                    model="gemini-2.5-flash-lite",
-                    contents=analysis_prompt
+                analysis_text = _f1_generate_llm_text(
+                    use_local=use_local,
+                    client=client,
+                    prompt=analysis_prompt,
+                    log=log,
+                    purpose="comparison analysis",
+                    context_label="F1 MCP Analysis",
+                    json_only=False,
                 )
-                analysis_text = analysis_response.text
 
                 analysis_section = render_comparison_analysis_section(analysis_text)
-                _f1_trace(log, f"Gemini analysis OK ({len(analysis_text)} chars)")
+                _f1_trace(log, f"Analysis LLM OK ({len(analysis_text)} chars)")
             except Exception as e:
                 analysis_section = f"<div class='mt-8'><p class='text-red-400'>Error generating analysis: {str(e)}</p></div>"
-                _f1_trace(log, f"Gemini analysis failed: {e}")
+                _f1_trace(log, f"Analysis LLM failed: {e}")
 
             # Combine plot and analysis
             _f1_trace(log, "compare_driver_lap_times flow complete")
@@ -560,7 +615,8 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
             return f"<p>Error: Unknown tool '{tool_name}'</p>"
     except json.JSONDecodeError as e:
         _f1_trace(log, f"JSON parse error: {e}")
-        return f"<p>Error parsing Gemini response: {str(e)}<br>Response was: {response.text[:200]}</p>"
+        preview = html_lib.escape((routing_response_text or "")[:500])
+        return f"<p>Error parsing LLM routing response: {str(e)}<br><pre>{preview}</pre></p>"
     except Exception as e:
         import traceback
         _f1_trace(log, f"Unhandled exception: {e}\n{traceback.format_exc()}")
@@ -568,11 +624,12 @@ def _f1_mcp_res_run(query: str, log: list[str]) -> str:
 
 
 @rt
-def f1_mcp_res(query: str):
+def f1_mcp_res(query: str, use_local_gemma: str = ""):
+    use_local = str(use_local_gemma or "").strip().lower() in ("1", "on", "true", "yes")
     log_buf: list[str] = []
     token = f1_mcp_log_ctx.set(log_buf)
     try:
-        return _f1_response_with_logs(_f1_mcp_res_run(query, log_buf), log_buf)
+        return _f1_response_with_logs(_f1_mcp_res_run(query, log_buf, use_local=use_local), log_buf)
     finally:
         f1_mcp_log_ctx.reset(token)
 
@@ -647,6 +704,23 @@ def get():
                     cls='grid gap-3 md:grid-cols-2'
                 ),
                 cls='rounded-xl border border-base-300 bg-base-200/40 p-4 flex flex-col gap-3'
+            ),
+            Div(
+                Label(
+                    Input(
+                        type='checkbox',
+                        name='use_local_gemma',
+                        value='1',
+                        cls='checkbox checkbox-primary',
+                    ),
+                    Span('Use local Gemma (Ollama) instead of Gemini', cls='text-sm'),
+                    cls='label cursor-pointer flex flex-row items-center gap-2 justify-start w-fit',
+                ),
+                P(
+                    'Ollama defaults: F1_OLLAMA_URL=http://127.0.0.1:11434, F1_LOCAL_GEMMA_MODEL=gemma3:4b-it-qat',
+                    cls='text-xs opacity-60 max-w-2xl',
+                ),
+                cls='flex flex-col gap-1',
             ),
             Div(
                 Button(
