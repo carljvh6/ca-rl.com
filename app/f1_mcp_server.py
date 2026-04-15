@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from f1_mcp.tools.analysis_tools import (
     analyze_driver_stints as _analyze_driver_stints_impl,
     analyze_qualifying_runs as _analyze_qualifying_runs_impl,
+    compare_lap_replay as _compare_lap_replay_impl,
     compare_driver_stints as _compare_driver_stints_impl,
     compare_driver_lap_times as _compare_driver_lap_times_impl,
     compare_qualifying_runs as _compare_qualifying_runs_impl,
@@ -63,6 +64,28 @@ def compare_driver_lap_times(
         driver_code1,
         driver_code2,
         session_type=session_type,
+    )
+
+
+@mcp.tool()
+def compare_lap_replay(
+    year: int,
+    race: str,
+    session_type: str,
+    driver_code1: str,
+    driver_code2: str,
+    lap_selector1: str = "best_valid_lap",
+    lap_selector2: str = "best_valid_lap",
+) -> dict:
+    """Build a replay payload for two resolved laps with telemetry-aligned samples."""
+    return _compare_lap_replay_impl(
+        year=year,
+        race=race,
+        session_type=session_type,
+        driver_code1=driver_code1,
+        driver_code2=driver_code2,
+        lap_selector1=lap_selector1,
+        lap_selector2=lap_selector2,
     )
 
 

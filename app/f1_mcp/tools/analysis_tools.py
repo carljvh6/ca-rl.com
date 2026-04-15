@@ -9,6 +9,7 @@ from f1_mcp.providers.session_provider import is_qualifying_session_type, load_s
 from f1_mcp.rendering.plots import render_comparison_lap_plot, render_single_driver_lap_plot
 from f1_mcp.services.compare_analysis import compare_two_drivers
 from f1_mcp.services.lap_analysis import build_lap_records, summarize_laps
+from f1_mcp.services.lap_replay import compare_lap_replay as build_compare_lap_replay_payload
 from f1_mcp.services.qualifying_analysis import (
     build_qualifying_runs_payload,
     compare_qualifying_payloads,
@@ -147,6 +148,41 @@ def compare_driver_lap_times(
         }
     except Exception as exc:
         logger.error("Error comparing lap times: %s", exc)
+        return {"error": str(exc)}
+
+
+def compare_lap_replay(
+    year: int,
+    race: str,
+    session_type: str,
+    driver_code1: str,
+    driver_code2: str,
+    lap_selector1: str = "best_valid_lap",
+    lap_selector2: str = "best_valid_lap",
+) -> dict:
+    """Resolve two laps and return a replay payload for browser-side animation."""
+    logger.info(
+        "Building lap replay for %s vs %s in %s - %s (%s) [%s vs %s]",
+        driver_code1,
+        driver_code2,
+        year,
+        race,
+        session_type,
+        lap_selector1,
+        lap_selector2,
+    )
+    try:
+        return build_compare_lap_replay_payload(
+            year=year,
+            race=race,
+            session_type=session_type,
+            driver_code1=driver_code1.upper(),
+            driver_code2=driver_code2.upper(),
+            lap_selector1=lap_selector1,
+            lap_selector2=lap_selector2,
+        )
+    except Exception as exc:
+        logger.error("Error building lap replay: %s", exc)
         return {"error": str(exc)}
 
 

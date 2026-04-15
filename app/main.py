@@ -25,6 +25,7 @@ if app_dir not in sys.path:
 from f1_mcp_server import (
     analyze_driver_stints,
     analyze_qualifying_runs,
+    compare_lap_replay,
     compare_driver_stints,
     compare_driver_lap_times,
     compare_qualifying_runs,
@@ -49,6 +50,7 @@ from f1_mcp.rendering.html_sections import (
     render_results_table,
     render_stint_comparison,
 )
+from f1_mcp.rendering.lap_replay_widget import render_lap_replay_widget
 from f1_mcp.rendering.plots import (
     render_driver_stints_plot,
     render_qualifying_comparison_plot,
@@ -75,6 +77,7 @@ example_prompts = {
     "Driver comparisons": [
         "Compare Verstappen and Norris in Bahrain 2025 qualifying",
         "Compare Hamilton and Russell lap times at Silverstone 2025",
+        "Replay Verstappen vs Norris best quali lap at Barcelona 2025",
         "Compare the stints of Norris and Piastri in Miami 2025",
         "Compare Verstappen and Leclerc race pace by stint in Monza 2025",
     ],
@@ -85,6 +88,7 @@ example_prompts = {
         "Show Verstappen's FP2 lap times in Bahrain 2025",
         "Who won the 2026 Australian Grand Prix and what was the gap to P2?",
         "Compare qualifying lap times for Verstappen and Leclerc at the 2026 Japanese Grand Prix",
+        "Animate Verstappen vs Norris best quali lap replay at Barcelona 2025",
         "Show Verstappen's qualifying runs at Bahrain 2025",
         "Compare qualifying runs for Verstappen and Norris in Bahrain 2025",
         "Which of Norris's laps were push laps vs cooldown laps in Bahrain 2025 qualifying?",
@@ -350,7 +354,7 @@ def _normalize_f1_routing_decision(decision: dict, *, query: str, log: list[str]
         if out.get("driver_code1") and out.get("driver_code2"):
             _f1_trace(log, "Routing JSON: mapped drivers[] -> driver_code1/driver_code2")
 
-    if tool in {"compare_driver_lap_times", "compare_qualifying_runs"} and (
+    if tool in {"compare_driver_lap_times", "compare_qualifying_runs", "compare_lap_replay"} and (
         not out.get("driver_code1") or not out.get("driver_code2")
     ):
         q = (query or "").upper()
@@ -458,6 +462,22 @@ def _is_qualifying_runs_query(query: str, session_type: str) -> bool:
     return any(keyword in query_lower for keyword in keywords)
 
 
+def _is_lap_replay_query(query: str) -> bool:
+    query_lower = (query or "").lower()
+    keywords = (
+        "replay lap",
+        "lap replay",
+        "animate lap",
+        "lap animation",
+        "compare laps",
+        "best quali lap replay",
+        "best qualifying lap replay",
+    )
+    if any(keyword in query_lower for keyword in keywords):
+        return True
+    return ("replay" in query_lower or "animate" in query_lower) and "lap" in query_lower
+
+
 def _is_stint_query(query: str, session_type: str) -> bool:
     query_lower = (query or "").lower()
     has_stint_intent = (
@@ -466,6 +486,30 @@ def _is_stint_query(query: str, session_type: str) -> bool:
         or "pace by stint" in query_lower
     )
     return has_stint_intent
+
+
+def _infer_lap_selectors_from_query(query: str, session_type: str) -> tuple[str, str]:
+    query_lower = (query or "").lower()
+    explicit_match = re.search(r"\blap\s+(\d+)\b", query_lower)
+    if explicit_match:
+        selector = explicit_match.group(1)
+        return selector, selector
+    if "best q1" in query_lower:
+        return "best_q1_lap", "best_q1_lap"
+    if "best q2" in query_lower:
+        return "best_q2_lap", "best_q2_lap"
+    if "best q3" in query_lower:
+        return "best_q3_lap", "best_q3_lap"
+    if "fastest lap" in query_lower:
+        return "fastest_lap", "fastest_lap"
+    if str(session_type or "").strip().upper() in {"Q", "SQ"}:
+        return "best_valid_push_lap", "best_valid_push_lap"
+    if any(
+        token in query_lower
+        for token in ("best quali lap", "best qualifying lap", "best push lap", "best valid push lap")
+    ):
+        return "best_valid_push_lap", "best_valid_push_lap"
+    return "best_valid_lap", "best_valid_lap"
 
 
 # Track API call timestamps for rate limit monitoring
@@ -762,6 +806,7 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             - get_driver_lap_times(year, race, driver_code, session_type) for lap time data (without plotting)
             - plot_driver_lap_times(year, race, driver_code, session_type) for single driver lap time plots
             - compare_driver_lap_times(year, race, driver_code1, driver_code2, session_type) for comparing two drivers' lap times
+            - compare_lap_replay(year, race, session_type, driver_code1, driver_code2, lap_selector1, lap_selector2) for replaying or animating two resolved laps around the circuit
             - analyze_driver_stints(year, race, driver_code, session_type) for single-driver stint analysis in race or sprint sessions
             - compare_driver_stints(year, race, driver_code1, driver_code2, session_type) for comparing tyre stints, degradation, or race pace by stint
             - analyze_qualifying_runs(year, race, driver_code, session_type) for qualifying run structure, push laps, out laps, cooldown laps, or Q1/Q2/Q3 analysis
@@ -769,7 +814,7 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
 
             Query: {query}
 
-            Respond in JSON: {{"tool": "tool_name", "year": 2025, "race": "race_name", "session_type": "R", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "LEC"}}
+            Respond in JSON: {{"tool": "tool_name", "year": 2025, "race": "race_name", "session_type": "R", "driver_code": "VER", "driver_code1": "HAM", "driver_code2": "LEC", "lap_selector1": "best_valid_lap", "lap_selector2": "best_valid_lap"}}
             Extract year (default 2025), race name, and driver code(s) (3-letter code like VER, NOR, HAM) if needed.
             Default session_type to "R" if not specified.
             Infer session_type from the query:
@@ -782,6 +827,7 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             - race/grand prix/results/won the race -> "R"
             For race or sprint requests mentioning stints, tyre degradation, or race pace by stint, use the stint tools.
             For qualifying requests mentioning push laps, flying laps, hot laps, cooldown laps, out laps, run structure, or Q1/Q2/Q3 progression, use the qualifying tools.
+            For requests about replaying, animating, or comparing two laps around the circuit, use compare_lap_replay.
             For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2 unless the request is specifically about qualifying runs/segments or stint analysis, in which case use the matching qualifying or stint comparison tool.
             For "lap times" without "plot" or "graph", use get_driver_lap_times.
             For "plot" or "graph", use plot_driver_lap_times."""
@@ -813,14 +859,22 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
         driver_code = decision.get("driver_code")
         driver_code1 = decision.get("driver_code1")
         driver_code2 = decision.get("driver_code2")
+        lap_selector1 = decision.get("lap_selector1")
+        lap_selector2 = decision.get("lap_selector2")
 
         _f1_trace(
             log,
             f"Routing decision: tool={tool_name!r} year={year} race={race!r} session_type={session_type!r} "
-            f"driver_code={driver_code!r} driver_code1={driver_code1!r} driver_code2={driver_code2!r}",
+            f"driver_code={driver_code!r} driver_code1={driver_code1!r} driver_code2={driver_code2!r} "
+            f"lap_selector1={lap_selector1!r} lap_selector2={lap_selector2!r}",
         )
 
-        if _is_qualifying_runs_query(query, session_type):
+        if _is_lap_replay_query(query):
+            tool_name = "compare_lap_replay"
+            if not lap_selector1 or not lap_selector2:
+                lap_selector1, lap_selector2 = _infer_lap_selectors_from_query(query, session_type)
+            _f1_trace(log, f"Lap replay keyword override -> tool={tool_name!r} selectors={lap_selector1!r}/{lap_selector2!r}")
+        elif _is_qualifying_runs_query(query, session_type):
             if driver_code1 and driver_code2:
                 tool_name = "compare_qualifying_runs"
             elif driver_code:
@@ -1150,6 +1204,35 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             # Combine plot and analysis
             _f1_trace(log, f"compare_driver_lap_times flow complete (session={normalized_session_type})")
             return plot_html + analysis_section
+        elif tool_name == "compare_lap_replay":
+            if not race:
+                _f1_trace(log, "(validation) compare_lap_replay missing race")
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code1 or not driver_code2:
+                _f1_trace(log, "(validation) compare_lap_replay missing driver pair")
+                return "<p>Error: Two driver codes required for a lap replay.</p>"
+            inferred_selector1, inferred_selector2 = _infer_lap_selectors_from_query(query, session_type)
+            lap_selector1 = lap_selector1 or inferred_selector1
+            lap_selector2 = lap_selector2 or inferred_selector2
+            _f1_trace(
+                log,
+                f"Tool call: compare_lap_replay({year!r}, {race!r}, session_type={session_type!r}, "
+                f"{driver_code1.upper()!r}, {driver_code2.upper()!r}, lap_selector1={lap_selector1!r}, lap_selector2={lap_selector2!r})",
+            )
+            result = compare_lap_replay(
+                year=year,
+                race=race,
+                session_type=session_type,
+                driver_code1=driver_code1.upper(),
+                driver_code2=driver_code2.upper(),
+                lap_selector1=lap_selector1,
+                lap_selector2=lap_selector2,
+            )
+            if "error" in result:
+                _f1_trace(log, f"compare_lap_replay error: {result.get('error', 'Unknown error')}")
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+            _f1_trace(log, "compare_lap_replay OK")
+            return render_lap_replay_widget(result)
         else:
             _f1_trace(log, f"Unknown tool name from model: {tool_name!r}")
             return f"<p>Error: Unknown tool '{tool_name}'</p>"
