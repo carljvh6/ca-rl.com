@@ -32,6 +32,13 @@ def render_lap_replay_widget(payload: dict) -> str:
         accent = escape(str(driver.get("color") or "#ffffff"))
         lap_no = escape(str(driver.get("lap_number") or "—"))
         lap_time = escape(_format_lap_time(driver.get("lap_time_seconds")))
+        telemetry_status = driver.get("telemetry_status") or {}
+        missing_fields = [field.title() for field in ("speed", "throttle", "brake", "gear") if telemetry_status.get(field) != "ok"]
+        warning_html = (
+            f"<div class='lap-replay-warning' data-role='telemetry-warning'>Missing telemetry: {escape(', '.join(missing_fields))}</div>"
+            if missing_fields
+            else ""
+        )
         segment_html = f"<span class='lap-replay-meta-chip'>{segment}</span>" if segment else ""
         return f"""
         <div class="lap-replay-card" data-driver="{code}" style="--lap-accent:{accent}">
@@ -46,11 +53,12 @@ def render_lap_replay_widget(payload: dict) -> str:
                     <span class="lap-replay-meta-chip">{lap_time}</span>
                 </div>
             </div>
+            {warning_html}
             <div class="lap-replay-stats">
-                <div><span>Speed</span><strong data-field="speed">0</strong><small>km/h</small></div>
-                <div><span>Throttle</span><strong data-field="throttle">0</strong><small>%</small></div>
-                <div><span>Brake</span><strong data-field="brake">0</strong><small>%</small></div>
-                <div><span>Gear</span><strong data-field="gear">0</strong><small>gear</small></div>
+                <div><span>Speed</span><strong data-field="speed">—</strong><small>km/h</small></div>
+                <div><span>Throttle</span><strong data-field="throttle">—</strong><small>%</small></div>
+                <div><span>Brake</span><strong data-field="brake">—</strong><small>%</small></div>
+                <div><span>Gear</span><strong data-field="gear">—</strong><small>gear</small></div>
             </div>
         </div>
         """
@@ -136,6 +144,7 @@ def render_lap_replay_widget(payload: dict) -> str:
             #{widget_id} .lap-replay-status strong {{ display:block; color:var(--ink); font-size:1rem; margin-top:3px; }}
             #{widget_id} .lap-replay-card {{ border-radius:18px; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border:1px solid rgba(148,163,184,0.18); padding:14px; }}
             #{widget_id} .lap-replay-card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
+            #{widget_id} .lap-replay-warning {{ margin:-2px 0 12px; color:#fbbf24; font-size:0.82rem; }}
             #{widget_id} .lap-replay-code {{ font-size:1.1rem; font-weight:800; letter-spacing:0.04em; color:var(--lap-accent); }}
             #{widget_id} .lap-replay-label {{ color:var(--muted); font-size:0.88rem; margin-top:2px; }}
             #{widget_id} .lap-replay-meta {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
@@ -206,6 +215,7 @@ def render_lap_replay_widget(payload: dict) -> str:
                 const state = {{ mode: payload.mode_default || 'real_time', playing: true, currentTime: 0, raf: null, lastStamp: null }};
                 const modeData = () => payload.modes[state.mode] || {{ duration_seconds: 1, samples: [] }};
                 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+                const displayValue = (value) => value == null || Number.isNaN(Number(value)) ? '—' : String(value);
                 const formatTime = (seconds) => {{
                     const value = Number(seconds || 0);
                     const mins = Math.floor(value / 60);
@@ -230,7 +240,7 @@ def render_lap_replay_widget(payload: dict) -> str:
                     if (card) {{
                         for (const field of ['speed', 'throttle', 'brake', 'gear']) {{
                             const el = card.querySelector(`[data-field="${{field}}"]`);
-                            if (el) el.textContent = sampleData[field] ?? 0;
+                            if (el) el.textContent = displayValue(sampleData[field]);
                         }}
                     }}
                 }};
@@ -279,6 +289,9 @@ def render_lap_replay_widget(payload: dict) -> str:
                     }}
                     render();
                 }};
+                const syncInitialTime = () => {{
+                    state.currentTime = clamp(Number(modeData().initial_time_seconds || 0), 0, Number(modeData().duration_seconds || 1));
+                }};
                 const start = () => {{
                     cancelAnimationFrame(state.raf);
                     state.playing = true;
@@ -311,10 +324,15 @@ def render_lap_replay_widget(payload: dict) -> str:
                         state.mode = button.dataset.mode;
                         modeButtons.forEach((el) => el.classList.toggle('active', el === button));
                         const next = modeData();
-                        state.currentTime = clamp(ratio * Number(next.duration_seconds || 1), 0, Number(next.duration_seconds || 1));
+                        const nextDuration = Number(next.duration_seconds || 1);
+                        state.currentTime = clamp(ratio * nextDuration, 0, nextDuration);
+                        if (!Number.isFinite(state.currentTime) || state.currentTime === 0) {{
+                            syncInitialTime();
+                        }}
                         render();
                     }});
                 }});
+                syncInitialTime();
                 render();
                 start();
             }})();
