@@ -1,0 +1,36 @@
+# FastHTML and ASGI server
+python-fasthtml>=0.4.0
+uvicorn[standard]>=0.24.0
+
+# GCP libraries for Secret Manager (for future use)
+google-cloud-secret-manager>=2.18.0
+
+# Google Generative AI (Gemini API)
+google-genai>=0.2.0
+
+# Configuration and utilities
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+markdown>=3.5.0
+
+# Ipykernel only for testing in jupypter notebook
+ipykernel>=6.26.0
+
+# F1 stuff
+fastf1>=3.7.0
+plotly==6.5.0
+nbformat==5.10.4
+
+# MCP (Model Context Protocol)
+fastmcp>=0.9.0
+
+# PDF processing
+pymupdf>=1.23.0
+
+# RAG dependencies
+# COMMENTED OUT - Retrieval functionality temporarily disabled
+# chromadb>=0.5.0
+# onnxruntime>=1.22.0  # Required for ChromaDB's default embedding function (no torch needed)
+# Using ChromaDB's default embedding function (ONNX-based, no torch needed)
+# sentence-transformers>=3.0.0  # Not needed - ChromaDB uses ONNX embeddings
+# cross-encoder>=0.1.0  # Not needed - skipping reranking for simplicity

@@ -1,0 +1,195 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  REGION: europe-west1
+  REGISTRY: eu.gcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      short-sha: ${{ steps.meta.outputs.short-sha }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Build and push Docker image (Dev)
+        if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+        run: |
+          BUILD_ID=$(gcloud builds submit \
+            --config=infrastructure/build_dev.yaml \
+            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
+            --project=${{ secrets.GCP_PROJECT_ID_DEV }} \
+            --async \
+            --format="value(id)")
+          
+          echo "Build submitted with ID: $BUILD_ID"
+          echo "View build logs at: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=${{ secrets.GCP_PROJECT_ID_DEV }}"
+          
+          # Poll for build completion (max 15 minutes = 900 seconds)
+          TIMEOUT=900
+          ELAPSED=0
+          INTERVAL=5
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(gcloud builds describe $BUILD_ID \
+              --project=${{ secrets.GCP_PROJECT_ID_DEV }} \
+              --format="value(status)" 2>/dev/null || echo "WORKING")
+            
+            if [ "$STATUS" = "SUCCESS" ]; then
+              echo "Build completed successfully!"
+              exit 0
+            elif [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "EXPIRED" ]; then
+              echo "Build failed with status: $STATUS"
+              exit 1
+            fi
+            
+            echo "Build status: $STATUS (waiting...)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "Build timed out after $TIMEOUT seconds"
+          exit 1
+      
+      - name: Build and push Docker image (Prod)
+        if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+        run: |
+          BUILD_ID=$(gcloud builds submit \
+            --config=infrastructure/build_prod.yaml \
+            --substitutions=SHORT_SHA=${{ steps.meta.outputs.short-sha }} \
+            --project=${{ secrets.GCP_PROJECT_ID_PROD }} \
+            --async \
+            --format="value(id)")
+          
+          echo "Build submitted with ID: $BUILD_ID"
+          echo "View build logs at: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=${{ secrets.GCP_PROJECT_ID_PROD }}"
+          
+          # Poll for build completion (max 15 minutes = 900 seconds)
+          TIMEOUT=900
+          ELAPSED=0
+          INTERVAL=5
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(gcloud builds describe $BUILD_ID \
+              --project=${{ secrets.GCP_PROJECT_ID_PROD }} \
+              --format="value(status)" 2>/dev/null || echo "WORKING")
+            
+            if [ "$STATUS" = "SUCCESS" ]; then
+              echo "Build completed successfully!"
+              exit 0
+            elif [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "EXPIRED" ]; then
+              echo "Build failed with status: $STATUS"
+              exit 1
+            fi
+            
+            echo "Build status: $STATUS (waiting...)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "Build timed out after $TIMEOUT seconds"
+          exit 1
+  
+  deploy-dev:
+    needs: build
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Deploy to Cloud Run (Dev)
+        run: |
+          gcloud run deploy fasthtml-app-dev \
+            --image eu.gcr.io/${{ secrets.GCP_PROJECT_ID_DEV }}/fasthtml-app:${{ steps.meta.outputs.short-sha }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ secrets.GCP_PROJECT_ID_DEV }} \
+            --memory 4Gi \
+            --cpu 1 \
+            --timeout 300 \
+            --concurrency 80 \
+            --min-instances 0 \
+            --max-instances 25 \
+            --execution-environment gen2 \
+            --cpu-boost \
+            --service-account fasthtml-app-dev@${{ secrets.GCP_PROJECT_ID_DEV }}.iam.gserviceaccount.com \
+            --set-env-vars ENV=dev \
+            --allow-unauthenticated
+  
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval if configured
+    steps:
+      - uses: actions/checkout@v4
+      
+      - id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Deploy to Cloud Run (Prod)
+        run: |
+          gcloud run deploy fasthtml-app-prod \
+            --image eu.gcr.io/${{ secrets.GCP_PROJECT_ID_PROD }}/fasthtml-app:${{ steps.meta.outputs.short-sha }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --memory 4Gi \
+            --cpu 1 \
+            --timeout 300 \
+            --concurrency 80 \
+            --min-instances 0 \
+            --max-instances 25 \
+            --execution-environment gen2 \
+            --cpu-boost \
+            --service-account fasthtml-app-prod@${{ secrets.GCP_PROJECT_ID_PROD }}.iam.gserviceaccount.com \
+            --set-env-vars ENV=prod \
+            --allow-unauthenticated

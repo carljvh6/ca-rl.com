@@ -1,0 +1,30 @@
+# Exclude unnecessary files from Docker build context
+# Note: We do NOT exclude *.json here to ensure static/rag/*.json files are included
+
+# Exclude common patterns
+**/.git
+**/.gitignore
+**/.dockerignore
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/.env
+**/.env.local
+
+# Exclude specific JSON files that contain secrets (but NOT static/rag/*.json)
+deploy_key.json
+service_acc_key.json
+service-account-*.json
+
+# Exclude other unnecessary files
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/nedbank_chroma/
+**/docker-compose.yml
+**/docker-test.sh
+
+
+
