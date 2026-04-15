@@ -239,6 +239,17 @@ def _format_seconds(value: object) -> str:
     return f"{mins}:{secs:06.3f}"
 
 
+def _format_signed_seconds(value: object, *, per_lap: bool = False) -> str:
+    if value is None:
+        return "—"
+    try:
+        total = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    suffix = "s/lap" if per_lap else "s"
+    return f"{total:+.3f}{suffix}"
+
+
 def _render_key_value_table(headers: list[str], rows: list[list[str]]) -> str:
     if not rows:
         return "<p class='opacity-70'>No data available.</p>"
@@ -543,4 +554,230 @@ def render_qualifying_comparison_prose(result: dict) -> str:
         "<div class='mt-6 prose prose-invert max-w-none'>"
         "<h3 class='text-2xl mb-4'>Analysis</h3>"
         f"{headline}{progression}{improvement}{invalid_html}</div>"
+    )
+
+
+def build_stint_comparison_analysis_prompt(
+    year: int,
+    race: str,
+    driver_code1: str,
+    driver_code2: str,
+    result: dict,
+    user_query: str,
+) -> str:
+    """Build an LLM prompt for two-driver stint comparison analysis."""
+    session_type = result.get("session_type", "R")
+    session_context = format_session_context(session_type)
+    return f"""Analyze the stint comparison between {driver_code1} and {driver_code2} in the {race} {year} {session_context}.
+
+Comparison data:
+{json.dumps(result, indent=2)}
+
+User query: {user_query}
+
+Provide concise F1 analysis focusing on:
+1. Which driver had the stronger clean pace by stint
+2. Tyre compound differences and stint length tradeoffs
+3. Pace-trend and late-stint fade signals, only when confidence is medium/high
+4. Any caveats from in-laps, out-laps, SC/VSC-heavy samples, or small clean-lap samples
+
+Rules:
+- Distinguish observation from inference. Prefer phrases like "the data suggests" and "the sample is limited".
+- Never infer team or driver intent from short stints alone.
+- Do not overinterpret 2-3 clean laps.
+- Only claim "better tyre management" if at least two support it:
+  a. better robust pace trend
+  b. lower clean-lap variance
+  c. stronger late-stint pace
+- If confidence is low, say so plainly.
+- Use clean stint metrics for pace conclusions. Mention all-lap metrics only as context."""
+
+
+def render_stint_summary_cards(summary: dict) -> str:
+    """Render summary cards for single-driver stint analysis."""
+    if not summary:
+        return ""
+    cards = [
+        ("Best clean-average stint", summary.get("best_stint_by_avg_clean"), "avg_lap_seconds_clean"),
+        ("Longest stint", summary.get("longest_stint"), "num_laps"),
+        ("Shortest stint", summary.get("shortest_stint"), "num_laps"),
+        ("Lowest pace-trend stint", summary.get("lowest_pace_trend_stint"), "pace_trend_robust_seconds_per_lap"),
+    ]
+    rendered = []
+    for title, payload, metric_key in cards:
+        if not payload:
+            value = "—"
+            detail = ""
+        else:
+            raw_value = payload.get(metric_key)
+            if metric_key == "pace_trend_robust_seconds_per_lap":
+                value = escape(f"{float(raw_value):+.3f}s/lap") if raw_value is not None else "—"
+            else:
+                value = _format_seconds(raw_value) if "seconds" in metric_key else escape(str(raw_value))
+            detail = (
+                f"Stint {payload.get('stint_number')} ({escape(str(payload.get('compound') or 'UNKNOWN'))})"
+                + (f", {escape(str(payload.get('confidence') or ''))} confidence" if payload.get("confidence") else "")
+            )
+        rendered.append(
+            "<div class='rounded-lg border border-base-300 bg-base-200/30 p-4'>"
+            f"<p class='text-sm opacity-70'>{escape(title)}</p>"
+            f"<p class='text-xl font-semibold mt-1'>{value}</p>"
+            f"<p class='text-sm opacity-75 mt-1'>{detail}</p>"
+            "</div>"
+        )
+    return "<div class='mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4'>" + "".join(rendered) + "</div>"
+
+
+def render_single_driver_stint_table(stints: list[dict]) -> str:
+    """Render a single-driver stint table."""
+    rows = [
+        [
+            escape(str(stint.get("stint_number"))),
+            escape(str(stint.get("compound") or "UNKNOWN")),
+            escape(f"{stint.get('start_lap')}–{stint.get('end_lap')}"),
+            escape(str(stint.get("num_laps"))),
+            escape(str(stint.get("clean_lap_count"))),
+            escape(str(stint.get("confidence") or "—").upper()),
+            escape(_format_seconds(stint.get("avg_lap_seconds_all"))),
+            escape(_format_seconds(stint.get("avg_lap_seconds_clean"))),
+            escape(_format_seconds(stint.get("best_lap_seconds"))),
+            escape(_format_signed_seconds(stint.get("pace_trend_robust_seconds_per_lap"), per_lap=True)),
+            escape(_format_signed_seconds(stint.get("late_stint_delta_seconds"))),
+            escape(
+                ", ".join(
+                    flag
+                    for flag, enabled in (
+                        ("out-lap", stint.get("includes_out_lap")),
+                        ("in-lap", stint.get("includes_in_lap")),
+                    )
+                    if enabled
+                ) or "—"
+            ),
+        ]
+        for stint in stints
+    ]
+    return _render_section(
+        "Stint table",
+        "<p class='text-sm opacity-70 mb-3'>Pace trend: positive means getting slower, negative means getting faster.</p>"
+        + _render_key_value_table(
+            ["Stint", "Compound", "Lap range", "Laps", "Clean laps", "Confidence", "Avg all", "Avg clean", "Best", "Pace trend", "Late-stint Δ", "Flags"],
+            rows,
+        ),
+    )
+
+
+def render_stint_lap_breakdown(stints: list[dict], *, driver_code: str) -> str:
+    """Render lap sequences for each stint."""
+    rows = []
+    for stint in stints:
+        lap_sequence = ", ".join(
+            f"L{lap.get('lap_number')}"
+            + (" OUT" if lap.get("is_out_lap") else "")
+            + (" IN" if lap.get("is_in_lap") else "")
+            + (" SC/VSC" if "4" in str(lap.get("track_status") or "") or "6" in str(lap.get("track_status") or "") or "7" in str(lap.get("track_status") or "") else "")
+            + (f" {_format_seconds(lap.get('lap_time_seconds'))}" if lap.get("lap_time_seconds") is not None else "")
+            for lap in stint.get("laps", [])
+        )
+        rows.append(
+            [
+                escape(driver_code),
+                escape(str(stint.get("stint_number"))),
+                escape(lap_sequence),
+            ]
+        )
+    return _render_section(
+        "Stint laps",
+        _render_key_value_table(["Driver", "Stint", "Lap sequence"], rows),
+    )
+
+
+def render_driver_stint_analysis(result: dict) -> str:
+    """Render the full single-driver stint analysis block."""
+    return (
+        render_stint_summary_cards(result.get("summary", {}))
+        + render_single_driver_stint_table(result.get("stints", []))
+        + render_stint_lap_breakdown(result.get("stints", []), driver_code=str(result.get("driver_code") or ""))
+    )
+
+
+def render_stint_comparison(result: dict) -> str:
+    """Render two-driver stint comparison sections."""
+    driver1 = str(result.get("driver_code1") or "")
+    driver2 = str(result.get("driver_code2") or "")
+    comparison = result.get("comparison", {})
+
+    def _matchup_rows(matchups: list[dict]) -> list[list[str]]:
+        return [
+            [
+                escape(f"{matchup.get('driver1_stint_number')} vs {matchup.get('driver2_stint_number')}"),
+                escape(str(matchup.get("driver1_compound") or "UNKNOWN")),
+                escape(str(matchup.get("driver2_compound") or "UNKNOWN")),
+                escape(_format_signed_seconds(matchup.get("avg_clean_delta_seconds"))),
+                escape(_format_signed_seconds(matchup.get("median_clean_delta_seconds"))),
+                escape(_format_signed_seconds(matchup.get("best_lap_delta_seconds"))),
+                escape(_format_signed_seconds(matchup.get("pace_trend_delta_seconds_per_lap"), per_lap=True)),
+                escape(str(matchup.get("confidence") or "—").upper()),
+                escape("Yes" if matchup.get("too_close_to_call") else "No"),
+                escape(str(matchup.get("faster_driver") or "—")),
+                escape(", ".join(matchup.get("notes", [])) or "—"),
+            ]
+            for matchup in matchups
+        ]
+
+    selected_mode = str(comparison.get("comparison_mode_used") or "ordinal")
+    mode_note = (
+        f"<p class='text-sm opacity-70 mb-3'>Comparison mode used: {escape(selected_mode)}. "
+        "Compound matching is preferred when strategies diverge materially.</p>"
+    )
+    return (
+        _render_section(
+            "Comparison summary",
+            mode_note
+            + _render_key_value_table(
+                ["Stints", f"{driver1} compound", f"{driver2} compound", "Avg clean Δ", "Median clean Δ", "Best-lap Δ", "Pace trend Δ", "Confidence", "Too close", "Faster driver", "Notes"],
+                _matchup_rows(comparison.get("stint_matchups", [])),
+            )
+            + _render_key_value_table(
+                ["Ordinal matchups", f"{driver1} compound", f"{driver2} compound", "Avg clean Δ", "Median clean Δ", "Best-lap Δ", "Pace trend Δ", "Confidence", "Too close", "Faster driver", "Notes"],
+                _matchup_rows(comparison.get("ordinal_matchups", [])),
+            )
+            + _render_key_value_table(
+                ["Compound matchups", f"{driver1} compound", f"{driver2} compound", "Avg clean Δ", "Median clean Δ", "Best-lap Δ", "Pace trend Δ", "Confidence", "Too close", "Faster driver", "Notes"],
+                _matchup_rows(comparison.get("compound_matchups", [])),
+            ),
+        )
+        + _render_section(f"{driver1} stints", _render_key_value_table(
+            ["Stint", "Compound", "Lap range", "Laps", "Clean laps", "Confidence", "Avg clean", "Best", "Pace trend"],
+            [
+                [
+                    escape(str(stint.get("stint_number"))),
+                    escape(str(stint.get("compound") or "UNKNOWN")),
+                    escape(f"{stint.get('start_lap')}–{stint.get('end_lap')}"),
+                    escape(str(stint.get("num_laps"))),
+                    escape(str(stint.get("clean_lap_count"))),
+                    escape(str(stint.get("confidence") or "—").upper()),
+                    escape(_format_seconds(stint.get("avg_lap_seconds_clean"))),
+                    escape(_format_seconds(stint.get("best_lap_seconds"))),
+                    escape(_format_signed_seconds(stint.get("pace_trend_robust_seconds_per_lap"), per_lap=True)),
+                ]
+                for stint in result.get("driver1_stints", [])
+            ],
+        ))
+        + _render_section(f"{driver2} stints", _render_key_value_table(
+            ["Stint", "Compound", "Lap range", "Laps", "Clean laps", "Confidence", "Avg clean", "Best", "Pace trend"],
+            [
+                [
+                    escape(str(stint.get("stint_number"))),
+                    escape(str(stint.get("compound") or "UNKNOWN")),
+                    escape(f"{stint.get('start_lap')}–{stint.get('end_lap')}"),
+                    escape(str(stint.get("num_laps"))),
+                    escape(str(stint.get("clean_lap_count"))),
+                    escape(str(stint.get("confidence") or "—").upper()),
+                    escape(_format_seconds(stint.get("avg_lap_seconds_clean"))),
+                    escape(_format_seconds(stint.get("best_lap_seconds"))),
+                    escape(_format_signed_seconds(stint.get("pace_trend_robust_seconds_per_lap"), per_lap=True)),
+                ]
+                for stint in result.get("driver2_stints", [])
+            ],
+        ))
     )

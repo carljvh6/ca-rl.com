@@ -332,3 +332,202 @@ def render_qualifying_comparison_plot(
     _apply_axes_style(ax)
     plt.tight_layout()
     return _figure_to_html(fig, "Qualifying Comparison Plot")
+
+
+def render_driver_stints_plot(
+    year: int,
+    race: str,
+    driver_code: str,
+    stints: list[dict],
+) -> str:
+    """Render a single-driver stint chart showing clean pace and pace trend."""
+    if not stints:
+        return ""
+
+    stint_numbers = [int(stint["stint_number"]) for stint in stints]
+    avg_clean = [
+        float(stint["avg_lap_seconds_clean"])
+        if stint.get("avg_lap_seconds_clean") is not None
+        else float(stint["avg_lap_seconds_all"])
+        if stint.get("avg_lap_seconds_all") is not None
+        else None
+        for stint in stints
+    ]
+    pace_trend = [
+        float(stint["pace_trend_robust_seconds_per_lap"])
+        if stint.get("pace_trend_robust_seconds_per_lap") is not None
+        else None
+        for stint in stints
+    ]
+    compounds = [str(stint.get("compound") or "UNK") for stint in stints]
+
+    if not any(value is not None for value in avg_clean):
+        return ""
+
+    plt.style.use("dark_background")
+    fig, ax1 = plt.subplots(figsize=(12, 6), facecolor="#181818")
+    ax1.set_facecolor("#181818")
+
+    bars = ax1.bar(
+        stint_numbers,
+        [value if value is not None else 0 for value in avg_clean],
+        color=["#ff3b3f", "#f59e0b", "#3b82f6", "#10b981", "#e879f9"][: len(stint_numbers)],
+        alpha=0.85,
+        width=0.65,
+    )
+    ax1.set_xlabel("Stint Number", color="#f1f1f1", fontsize=13)
+    ax1.set_ylabel("Average Clean Lap (s)", color="#f1f1f1", fontsize=14)
+    ax1.set_title(
+        f"{driver_code} Stint Pace and Pace Trend ({year} {race})",
+        color="#f1f1f1",
+        fontsize=19,
+        fontweight="bold",
+        pad=18,
+    )
+    ax1.set_xticks(stint_numbers)
+    ax1.set_xticklabels([f"{number}\n{compound}" for number, compound in zip(stint_numbers, compounds, strict=False)], color="#f1f1f1")
+
+    for bar, value in zip(bars, avg_clean, strict=False):
+        if value is None:
+            continue
+        ax1.annotate(
+            f"{value:.2f}s",
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            textcoords="offset points",
+            xytext=(0, 6),
+            ha="center",
+            color="#f3f4f6",
+            fontsize=10,
+        )
+
+    ax2 = ax1.twinx()
+    valid_deg_x = [x for x, value in zip(stint_numbers, pace_trend, strict=False) if value is not None]
+    valid_deg_y = [value for value in pace_trend if value is not None]
+    if valid_deg_x:
+        ax2.plot(
+            valid_deg_x,
+            valid_deg_y,
+            color="#f8fafc",
+            marker="o",
+            linewidth=2.2,
+            markersize=7,
+            label="Pace trend",
+        )
+        ax2.axhline(0, color="#9ca3af", linestyle="--", linewidth=1.2, alpha=0.5)
+        ax2.set_ylabel("Pace Trend (s/lap)", color="#f8fafc", fontsize=13)
+        ax2.tick_params(colors="#f8fafc", labelsize=11)
+        ax2.spines["right"].set_color("#666666")
+
+    _apply_axes_style(ax1)
+    plt.tight_layout()
+    return _figure_to_html(fig, "Driver Stint Analysis Plot")
+
+
+def render_stint_comparison_plot(
+    year: int,
+    race: str,
+    comparison_result: dict,
+) -> str:
+    """Render a two-driver stint comparison chart using clean-average pace."""
+    driver1 = str(comparison_result.get("driver_code1") or "")
+    driver2 = str(comparison_result.get("driver_code2") or "")
+    selected_matchups = comparison_result.get("comparison", {}).get("stint_matchups", [])
+    if not selected_matchups:
+        return ""
+    driver1_by_number = {int(stint["stint_number"]): stint for stint in comparison_result.get("driver1_stints", [])}
+    driver2_by_number = {int(stint["stint_number"]): stint for stint in comparison_result.get("driver2_stints", [])}
+    matchup_pairs = [
+        (
+            int(matchup["driver1_stint_number"]),
+            driver1_by_number.get(int(matchup["driver1_stint_number"])),
+            int(matchup["driver2_stint_number"]),
+            driver2_by_number.get(int(matchup["driver2_stint_number"])),
+            matchup,
+        )
+        for matchup in selected_matchups
+    ]
+    matchup_count = len(matchup_pairs)
+    if matchup_count == 0:
+        return ""
+
+    stint_numbers = list(range(1, matchup_count + 1))
+    driver1_avg = [
+        float(stint.get("avg_lap_seconds_clean"))
+        if stint and stint.get("avg_lap_seconds_clean") is not None
+        else float(stint.get("avg_lap_seconds_all"))
+        if stint and stint.get("avg_lap_seconds_all") is not None
+        else None
+        for _n1, stint, _n2, _other, _matchup in matchup_pairs
+    ]
+    driver2_avg = [
+        float(stint.get("avg_lap_seconds_clean"))
+        if stint and stint.get("avg_lap_seconds_clean") is not None
+        else float(stint.get("avg_lap_seconds_all"))
+        if stint and stint.get("avg_lap_seconds_all") is not None
+        else None
+        for _n1, _self, _n2, stint, _matchup in matchup_pairs
+    ]
+    if not any(value is not None for value in driver1_avg + driver2_avg):
+        return ""
+
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor="#181818")
+    ax.set_facecolor("#181818")
+    width = 0.34
+    x_positions = stint_numbers
+
+    ax.bar(
+        [x - width / 2 for x in x_positions],
+        [value if value is not None else 0 for value in driver1_avg],
+        width=width,
+        color="#ff3b3f",
+        alpha=0.9,
+        label=driver1,
+    )
+    ax.bar(
+        [x + width / 2 for x in x_positions],
+        [value if value is not None else 0 for value in driver2_avg],
+        width=width,
+        color="#3b82f6",
+        alpha=0.9,
+        label=driver2,
+    )
+
+    delta_points = []
+    for display_idx, (_n1, _stint1, _n2, _stint2, matchup) in enumerate(matchup_pairs, start=1):
+        delta = matchup.get("avg_clean_delta_seconds")
+        if delta is None:
+            continue
+        delta_points.append((display_idx, float(delta)))
+
+    if delta_points:
+        ax2 = ax.twinx()
+        ax2.plot(
+            [point[0] for point in delta_points],
+            [point[1] for point in delta_points],
+            color="#f8fafc",
+            marker="o",
+            linewidth=2.0,
+            markersize=7,
+            label="Avg clean Δ",
+        )
+        ax2.axhline(0, color="#9ca3af", linestyle="--", linewidth=1.2, alpha=0.5)
+        ax2.set_ylabel(f"{driver1} - {driver2} Avg Clean Δ (s)", color="#f8fafc", fontsize=13)
+        ax2.tick_params(colors="#f8fafc", labelsize=11)
+        ax2.spines["right"].set_color("#666666")
+
+    ax.set_xlabel("Matched stint number", color="#f1f1f1", fontsize=13)
+    ax.set_ylabel("Average Clean Lap (s)", color="#f1f1f1", fontsize=14)
+    ax.set_title(
+        f"{driver1} vs {driver2} Stint Pace Comparison ({year} {race})",
+        color="#f1f1f1",
+        fontsize=19,
+        fontweight="bold",
+        pad=18,
+    )
+    ax.set_xticks(stint_numbers)
+    ax.set_xticklabels([f"M{number}" for number in stint_numbers], color="#f1f1f1")
+    ax.legend(loc="best", fontsize=11, framealpha=0.3)
+    _apply_axes_style(ax)
+    plt.tight_layout()
+    return _figure_to_html(fig, "Driver Stint Comparison Plot")

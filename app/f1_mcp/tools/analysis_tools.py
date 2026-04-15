@@ -13,7 +13,13 @@ from f1_mcp.services.qualifying_analysis import (
     build_qualifying_runs_payload,
     compare_qualifying_payloads,
 )
-from f1_mcp.services.stint_analysis import summarize_stints
+from f1_mcp.services.stint_analysis import (
+    STINT_ANALYSIS_ERROR,
+    analyze_stints,
+    compare_stints,
+    is_race_like_session_type,
+    summarize_stints,
+)
 
 logger = logging.getLogger("f1_mcp_server")
 
@@ -237,4 +243,90 @@ def compare_qualifying_runs(
         return result
     except Exception as exc:
         logger.error("Error comparing qualifying runs: %s", exc)
+        return {"error": str(exc)}
+
+
+def analyze_driver_stints(
+    year: int,
+    race: str,
+    driver_code: str,
+    session_type: str = "R",
+) -> dict:
+    """Analyze one driver's race or sprint stints."""
+    logger.info("Analyzing stints for %s in %s - %s (%s)", driver_code, year, race, session_type)
+    try:
+        normalized_session_type = normalize_session_type(session_type)
+        if not is_race_like_session_type(normalized_session_type):
+            return {"error": STINT_ANALYSIS_ERROR}
+
+        driver_code = driver_code.upper()
+        driver_laps = get_driver_laps_df(year, race, normalized_session_type, driver_code)
+        if driver_laps.empty:
+            return {"error": f"No stint data available for driver {driver_code} in {year} - {race}"}
+
+        analysis = analyze_stints(driver_laps)
+        return {
+            "year": year,
+            "race": race,
+            "session_type": normalized_session_type,
+            "driver_code": driver_code,
+            "stints": analysis["stints"],
+            "summary": analysis["summary"],
+        }
+    except Exception as exc:
+        logger.error("Error analyzing driver stints: %s", exc)
+        return {"error": str(exc)}
+
+
+def compare_driver_stints(
+    year: int,
+    race: str,
+    driver_code1: str,
+    driver_code2: str,
+    session_type: str = "R",
+) -> dict:
+    """Compare two drivers' race or sprint stints."""
+    logger.info(
+        "Comparing stints for %s vs %s in %s - %s (%s)",
+        driver_code1,
+        driver_code2,
+        year,
+        race,
+        session_type,
+    )
+    try:
+        normalized_session_type = normalize_session_type(session_type)
+        if not is_race_like_session_type(normalized_session_type):
+            return {"error": STINT_ANALYSIS_ERROR}
+
+        driver1_result = analyze_driver_stints(year, race, driver_code1.upper(), session_type=normalized_session_type)
+        driver2_result = analyze_driver_stints(year, race, driver_code2.upper(), session_type=normalized_session_type)
+        if "error" in driver1_result:
+            return {"error": f"Error getting stint data for {driver_code1.upper()}: {driver1_result['error']}"}
+        if "error" in driver2_result:
+            return {"error": f"Error getting stint data for {driver_code2.upper()}: {driver2_result['error']}"}
+
+        comparison = compare_stints(
+            driver1_result.get("stints", []),
+            driver2_result.get("stints", []),
+            driver1_code=driver_code1.upper(),
+            driver2_code=driver_code2.upper(),
+        )
+        return {
+            "year": year,
+            "race": race,
+            "session_type": normalized_session_type,
+            "driver_code1": driver_code1.upper(),
+            "driver_code2": driver_code2.upper(),
+            "driver1_stints": driver1_result.get("stints", []),
+            "driver2_stints": driver2_result.get("stints", []),
+            "driver1_summary": driver1_result.get("summary", {}),
+            "driver2_summary": driver2_result.get("summary", {}),
+            "comparison_mode_used": comparison.get("comparison_mode_used"),
+            "ordinal_matchups": comparison.get("ordinal_matchups", []),
+            "compound_matchups": comparison.get("compound_matchups", []),
+            "comparison": comparison,
+        }
+    except Exception as exc:
+        logger.error("Error comparing driver stints: %s", exc)
         return {"error": str(exc)}

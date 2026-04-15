@@ -322,6 +322,246 @@ class ToolLayerTests(unittest.TestCase):
         self.assertEqual(result["driver_code1"], "VER")
         self.assertEqual(result["driver_code2"], "NOR")
 
+    def test_analyze_driver_stints_rejects_qualifying(self) -> None:
+        analysis_tools = importlib.import_module("f1_mcp.tools.analysis_tools")
+        result = analysis_tools.analyze_driver_stints(2025, "Bahrain", "VER", session_type="Q")
+        self.assertEqual(
+            result["error"],
+            "Stint analysis is only supported for race-like sessions (R, S).",
+        )
+
+    def test_compare_driver_stints_happy_path(self) -> None:
+        analysis_tools = importlib.import_module("f1_mcp.tools.analysis_tools")
+        stint_payload = {
+            "session_type": "R",
+            "driver_code": "VER",
+            "stints": [
+                {
+                    "stint_number": 1,
+                    "compound": "SOFT",
+                    "start_lap": 1,
+                    "end_lap": 10,
+                    "num_laps": 10,
+                    "laps": [],
+                    "avg_lap_seconds_all": 91.0,
+                    "avg_lap_seconds_clean": 90.5,
+                    "median_lap_seconds_clean": 90.4,
+                    "best_lap_seconds": 89.9,
+                    "pace_trend_raw_seconds_per_lap": 0.08,
+                    "pace_trend_robust_seconds_per_lap": 0.07,
+                    "degradation_slope_seconds_per_lap": 0.08,
+                    "clean_lap_count": 8,
+                    "excluded_lap_count": 2,
+                    "confidence": "high",
+                    "confidence_reasons": ["8 clean laps"],
+                    "late_stint_delta_seconds": 0.3,
+                    "includes_out_lap": True,
+                    "includes_in_lap": True,
+                }
+            ],
+            "summary": {},
+        }
+
+        with patch.object(analysis_tools, "analyze_driver_stints", side_effect=[stint_payload, {**stint_payload, "driver_code": "NOR"}]):
+            result = analysis_tools.compare_driver_stints(2025, "Miami", "VER", "NOR", session_type="R")
+
+        self.assertEqual(result["session_type"], "R")
+        self.assertEqual(result["driver_code1"], "VER")
+        self.assertEqual(result["driver_code2"], "NOR")
+        self.assertEqual(len(result["comparison"]["stint_matchups"]), 1)
+
+
+class StintAnalysisTests(unittest.TestCase):
+    def test_analyze_stints_marks_clean_metrics_and_summary(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        laps = pd.DataFrame(
+            [
+                {"LapNumber": 1, "LapTime": pd.to_timedelta("0 days 00:01:35"), "LapTimeSeconds": 95.0, "Compound": "SOFT", "PitOutTime": pd.to_timedelta("0 days 00:00:01"), "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 2, "LapTime": pd.to_timedelta("0 days 00:01:31"), "LapTimeSeconds": 91.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 3, "LapTime": pd.to_timedelta("0 days 00:01:32"), "LapTimeSeconds": 92.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.to_timedelta("0 days 00:04:40"), "TrackStatus": "1"},
+                {"LapNumber": 4, "LapTime": pd.to_timedelta("0 days 00:01:37"), "LapTimeSeconds": 97.0, "Compound": "MEDIUM", "PitOutTime": pd.to_timedelta("0 days 00:05:01"), "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 5, "LapTime": pd.to_timedelta("0 days 00:01:30"), "LapTimeSeconds": 90.0, "Compound": "MEDIUM", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+            ]
+        )
+
+        result = stint_analysis.analyze_stints(laps)
+        self.assertEqual(result["summary"]["num_stints"], 2)
+        self.assertEqual(result["stints"][0]["includes_out_lap"], True)
+        self.assertEqual(result["stints"][0]["includes_in_lap"], True)
+        self.assertEqual(result["stints"][0]["avg_lap_seconds_clean"], 91.0)
+        self.assertEqual(result["summary"]["best_stint_by_avg_clean"]["stint_number"], 2)
+
+    def test_infer_compound_uses_first_non_null_value(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        stint_df = pd.DataFrame([{"Compound": None}, {"Compound": "soft"}, {"Compound": "SOFT"}])
+        compound, source = stint_analysis.infer_stint_compound(stint_df)
+        self.assertEqual(compound, "SOFT")
+        self.assertEqual(source, "filled_from_stint")
+
+    def test_infer_compound_all_null_returns_unknown(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        stint_df = pd.DataFrame([{"Compound": None}, {"Compound": float("nan")}])
+        compound, source = stint_analysis.infer_stint_compound(stint_df)
+        self.assertEqual(compound, "UNKNOWN")
+        self.assertEqual(source, "unknown")
+
+    def test_pace_trend_sign_and_low_confidence_on_short_stint(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        laps = pd.DataFrame(
+            [
+                {"LapNumber": 1, "LapTimeSeconds": 96.0, "Compound": "SOFT", "PitOutTime": pd.to_timedelta("0 days 00:00:01"), "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 2, "LapTimeSeconds": 90.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 3, "LapTimeSeconds": 91.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 4, "LapTimeSeconds": 93.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.to_timedelta("0 days 00:03:10"), "TrackStatus": "1"},
+            ]
+        )
+        result = stint_analysis.analyze_stints(laps)
+        stint = result["stints"][0]
+        self.assertGreater(stint["pace_trend_robust_seconds_per_lap"], 0)
+        self.assertEqual(stint["confidence"], "low")
+        self.assertEqual(stint["clean_lap_count"], 2)
+
+    def test_timedelta_to_float_seconds_conversion(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        self.assertEqual(stint_analysis._to_float_seconds(pd.to_timedelta("0 days 00:01:31.500")), 91.5)
+        self.assertEqual(stint_analysis._to_float_seconds("0 days 00:01:30"), 90.0)
+
+    def test_late_stint_delta_known_sample(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        laps = pd.DataFrame(
+            [
+                {"LapNumber": 1, "LapTimeSeconds": 95.0, "Compound": "SOFT", "PitOutTime": pd.to_timedelta("0 days 00:00:01"), "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 2, "LapTimeSeconds": 90.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 3, "LapTimeSeconds": 90.2, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 4, "LapTimeSeconds": 90.4, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 5, "LapTimeSeconds": 90.6, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 6, "LapTimeSeconds": 96.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.to_timedelta("0 days 00:05:40"), "TrackStatus": "1"},
+            ]
+        )
+        result = stint_analysis.analyze_stints(laps)
+        stint = result["stints"][0]
+        self.assertAlmostEqual(stint["late_stint_delta_seconds"], 0.4, places=6)
+
+    def test_trend_calculation_known_monotonic_sample(self) -> None:
+        import pandas as pd
+
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        laps = pd.DataFrame(
+            [
+                {"LapNumber": 1, "LapTimeSeconds": 96.0, "Compound": "SOFT", "PitOutTime": pd.to_timedelta("0 days 00:00:01"), "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 2, "LapTimeSeconds": 90.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 3, "LapTimeSeconds": 90.2, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 4, "LapTimeSeconds": 90.4, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 5, "LapTimeSeconds": 90.6, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.NaT, "TrackStatus": "1"},
+                {"LapNumber": 6, "LapTimeSeconds": 97.0, "Compound": "SOFT", "PitOutTime": pd.NaT, "PitInTime": pd.to_timedelta("0 days 00:05:50"), "TrackStatus": "1"},
+            ]
+        )
+        result = stint_analysis.analyze_stints(laps)
+        stint = result["stints"][0]
+        self.assertAlmostEqual(stint["pace_trend_raw_seconds_per_lap"], 0.2, places=6)
+        self.assertAlmostEqual(stint["pace_trend_robust_seconds_per_lap"], 0.2, places=6)
+
+    def test_compare_stints_marks_too_close_to_call(self) -> None:
+        stint_analysis = importlib.import_module("f1_mcp.services.stint_analysis")
+        driver1_stints = [
+            {
+                "stint_number": 1,
+                "compound": "SOFT",
+                "avg_lap_seconds_clean": 90.01,
+                "median_lap_seconds_clean": 90.0,
+                "best_lap_seconds": 89.8,
+                "pace_trend_robust_seconds_per_lap": 0.02,
+                "confidence": "medium",
+                "confidence_reasons": ["5 clean laps"],
+            }
+        ]
+        driver2_stints = [
+            {
+                "stint_number": 1,
+                "compound": "SOFT",
+                "avg_lap_seconds_clean": 90.04,
+                "median_lap_seconds_clean": 90.02,
+                "best_lap_seconds": 89.81,
+                "pace_trend_robust_seconds_per_lap": 0.03,
+                "confidence": "low",
+                "confidence_reasons": ["4 clean laps"],
+            }
+        ]
+        comparison = stint_analysis.compare_stints(driver1_stints, driver2_stints, driver1_code="VER", driver2_code="NOR")
+        matchup = comparison["stint_matchups"][0]
+        self.assertTrue(matchup["too_close_to_call"])
+        self.assertEqual(matchup["faster_driver"], "Too close to call")
+
+    def test_stint_prompt_discourages_speculative_narrative(self) -> None:
+        markdown_backup = sys.modules.get("markdown")
+        markdown_stub = types.ModuleType("markdown")
+        markdown_stub.markdown = lambda text, extensions=None: text
+        sys.modules["markdown"] = markdown_stub
+        sys.modules.pop("f1_mcp.rendering.html_sections", None)
+        html_sections = importlib.import_module("f1_mcp.rendering.html_sections")
+        prompt = html_sections.build_stint_comparison_analysis_prompt(
+            2025,
+            "Bahrain",
+            "VER",
+            "NOR",
+            {"session_type": "R", "comparison": {"stint_matchups": []}},
+            "Compare the stints of Verstappen and Norris in Bahrain 2025",
+        )
+        self.assertIn("Do not overinterpret 2-3 clean laps.", prompt)
+        self.assertIn("Never infer team or driver intent from short stints alone.", prompt)
+        self.assertIn('Only claim "better tyre management"', prompt)
+        if markdown_backup is None:
+            sys.modules.pop("markdown", None)
+        else:
+            sys.modules["markdown"] = markdown_backup
+
+    def test_rendering_formats_trend_and_delta_as_signed_seconds(self) -> None:
+        markdown_backup = sys.modules.get("markdown")
+        markdown_stub = types.ModuleType("markdown")
+        markdown_stub.markdown = lambda text, extensions=None: text
+        sys.modules["markdown"] = markdown_stub
+        sys.modules.pop("f1_mcp.rendering.html_sections", None)
+        html_sections = importlib.import_module("f1_mcp.rendering.html_sections")
+        html = html_sections.render_single_driver_stint_table(
+            [
+                {
+                    "stint_number": 1,
+                    "compound": "SOFT",
+                    "start_lap": 1,
+                    "end_lap": 10,
+                    "num_laps": 10,
+                    "clean_lap_count": 8,
+                    "confidence": "high",
+                    "avg_lap_seconds_all": 91.0,
+                    "avg_lap_seconds_clean": 90.5,
+                    "best_lap_seconds": 89.9,
+                    "pace_trend_robust_seconds_per_lap": -0.184,
+                    "late_stint_delta_seconds": 0.312,
+                    "includes_out_lap": True,
+                    "includes_in_lap": True,
+                }
+            ]
+        )
+        self.assertIn("-0.184s/lap", html)
+        self.assertIn("+0.312s", html)
+        self.assertNotIn("-1:39.321", html)
+        if markdown_backup is None:
+            sys.modules.pop("markdown", None)
+        else:
+            sys.modules["markdown"] = markdown_backup
+
 
 class WrapperTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -379,6 +619,14 @@ class WrapperTests(unittest.TestCase):
         with patch.object(self.server, "_compare_qualifying_runs_impl", return_value={"ok": True}) as compare_runs:
             self.server.compare_qualifying_runs(2025, "Monza", "NOR", "LEC", session_type="Q")
         compare_runs.assert_called_once_with(2025, "Monza", "NOR", "LEC", session_type="Q")
+
+        with patch.object(self.server, "_analyze_driver_stints_impl", return_value={"ok": True}) as analyze_stints:
+            self.server.analyze_driver_stints(2025, "Monza", "NOR", session_type="R")
+        analyze_stints.assert_called_once_with(2025, "Monza", "NOR", session_type="R")
+
+        with patch.object(self.server, "_compare_driver_stints_impl", return_value={"ok": True}) as compare_stints:
+            self.server.compare_driver_stints(2025, "Monza", "NOR", "LEC", session_type="R")
+        compare_stints.assert_called_once_with(2025, "Monza", "NOR", "LEC", session_type="R")
 
 
 if __name__ == "__main__":

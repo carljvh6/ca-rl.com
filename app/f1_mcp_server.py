@@ -7,7 +7,9 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from f1_mcp.tools.analysis_tools import (
+    analyze_driver_stints as _analyze_driver_stints_impl,
     analyze_qualifying_runs as _analyze_qualifying_runs_impl,
+    compare_driver_stints as _compare_driver_stints_impl,
     compare_driver_lap_times as _compare_driver_lap_times_impl,
     compare_qualifying_runs as _compare_qualifying_runs_impl,
     get_driver_lap_times as _get_driver_lap_times_impl,
@@ -85,6 +87,35 @@ def compare_qualifying_runs(
 ) -> dict:
     """Compare qualifying runs for two drivers using push-lap metrics."""
     return _compare_qualifying_runs_impl(
+        year,
+        race,
+        driver_code1,
+        driver_code2,
+        session_type=session_type,
+    )
+
+
+@mcp.tool()
+def analyze_driver_stints(
+    year: int,
+    race: str,
+    driver_code: str,
+    session_type: str = "R",
+) -> dict:
+    """Analyze a driver's stints in a race-like session."""
+    return _analyze_driver_stints_impl(year, race, driver_code, session_type=session_type)
+
+
+@mcp.tool()
+def compare_driver_stints(
+    year: int,
+    race: str,
+    driver_code1: str,
+    driver_code2: str,
+    session_type: str = "R",
+) -> dict:
+    """Compare two drivers' stints in a race-like session."""
+    return _compare_driver_stints_impl(
         year,
         race,
         driver_code1,

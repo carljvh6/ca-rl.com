@@ -23,7 +23,9 @@ if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
 from f1_mcp_server import (
+    analyze_driver_stints,
     analyze_qualifying_runs,
+    compare_driver_stints,
     compare_driver_lap_times,
     compare_qualifying_runs,
     get_driver_lap_times,
@@ -33,9 +35,11 @@ from f1_mcp_server import (
 )
 from f1_mcp.rendering.html_sections import (
     build_comparison_analysis_prompt,
+    build_stint_comparison_analysis_prompt,
     format_session_context,
     format_session_heading,
     render_comparison_analysis_section,
+    render_driver_stint_analysis,
     render_qualifying_comparison_prose,
     render_qualifying_comparison_sections,
     render_qualifying_runs_prose,
@@ -43,8 +47,14 @@ from f1_mcp.rendering.html_sections import (
     render_lap_times_table,
     render_results_summary,
     render_results_table,
+    render_stint_comparison,
 )
-from f1_mcp.rendering.plots import render_qualifying_comparison_plot, render_qualifying_runs_plot
+from f1_mcp.rendering.plots import (
+    render_driver_stints_plot,
+    render_qualifying_comparison_plot,
+    render_qualifying_runs_plot,
+    render_stint_comparison_plot,
+)
 from f1_mcp.local_llm import get_local_llm_config, ollama_generate
 
 example_prompts = {
@@ -59,10 +69,14 @@ example_prompts = {
     "Driver analysis": [
         "Show me Lewis Hamilton's lap times in the 2025 British Grand Prix",
         "Plot Charles Leclerc's lap times for Monza 2025",
+        "Analyze Verstappen's stints in Bahrain 2025",
+        "Show Norris's stint analysis from Miami 2025",
     ],
     "Driver comparisons": [
         "Compare Verstappen and Norris in Bahrain 2025 qualifying",
         "Compare Hamilton and Russell lap times at Silverstone 2025",
+        "Compare the stints of Norris and Piastri in Miami 2025",
+        "Compare Verstappen and Leclerc race pace by stint in Monza 2025",
     ],
     "Advanced analysis": [
         "Compare Norris and Leclerc in qualifying at Monza 2025",
@@ -71,6 +85,14 @@ example_prompts = {
         "Show Verstappen's FP2 lap times in Bahrain 2025",
         "Who won the 2026 Australian Grand Prix and what was the gap to P2?",
         "Compare qualifying lap times for Verstappen and Leclerc at the 2026 Japanese Grand Prix",
+        "Show Verstappen's qualifying runs at Bahrain 2025",
+        "Compare qualifying runs for Verstappen and Norris in Bahrain 2025",
+        "Which of Norris's laps were push laps vs cooldown laps in Bahrain 2025 qualifying?",
+        "Who improved most from Q2 to Q3 in Bahrain 2025 qualifying?",
+        "Analyze Piastri's tyre degradation in Miami 2025",
+        "Compare Russell and Hamilton tyre degradation by stint in Silverstone 2025",
+        "Show Leclerc's sprint stints in Shanghai 2025",
+        "Compare the sprint stints of Verstappen and Norris in Austin 2025",
     ],
 }
 
@@ -436,6 +458,16 @@ def _is_qualifying_runs_query(query: str, session_type: str) -> bool:
     return any(keyword in query_lower for keyword in keywords)
 
 
+def _is_stint_query(query: str, session_type: str) -> bool:
+    query_lower = (query or "").lower()
+    has_stint_intent = (
+        "stint" in query_lower
+        or "degradation" in query_lower
+        or "pace by stint" in query_lower
+    )
+    return has_stint_intent
+
+
 # Track API call timestamps for rate limit monitoring
 api_call_times = deque(maxlen=100)
 
@@ -730,6 +762,8 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             - get_driver_lap_times(year, race, driver_code, session_type) for lap time data (without plotting)
             - plot_driver_lap_times(year, race, driver_code, session_type) for single driver lap time plots
             - compare_driver_lap_times(year, race, driver_code1, driver_code2, session_type) for comparing two drivers' lap times
+            - analyze_driver_stints(year, race, driver_code, session_type) for single-driver stint analysis in race or sprint sessions
+            - compare_driver_stints(year, race, driver_code1, driver_code2, session_type) for comparing tyre stints, degradation, or race pace by stint
             - analyze_qualifying_runs(year, race, driver_code, session_type) for qualifying run structure, push laps, out laps, cooldown laps, or Q1/Q2/Q3 analysis
             - compare_qualifying_runs(year, race, driver_code1, driver_code2, session_type) for qualifying run comparisons, push-lap comparisons, or Q1/Q2/Q3 qualifying comparisons
 
@@ -746,8 +780,9 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             - FP2/practice 2 -> "FP2"
             - FP3/practice 3 -> "FP3"
             - race/grand prix/results/won the race -> "R"
+            For race or sprint requests mentioning stints, tyre degradation, or race pace by stint, use the stint tools.
             For qualifying requests mentioning push laps, flying laps, hot laps, cooldown laps, out laps, run structure, or Q1/Q2/Q3 progression, use the qualifying tools.
-            For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2 unless the request is specifically about qualifying runs or qualifying segments, in which case use compare_qualifying_runs.
+            For comparison requests mentioning two drivers, use compare_driver_lap_times with driver_code1 and driver_code2 unless the request is specifically about qualifying runs/segments or stint analysis, in which case use the matching qualifying or stint comparison tool.
             For "lap times" without "plot" or "graph", use get_driver_lap_times.
             For "plot" or "graph", use plot_driver_lap_times."""
         if use_local:
@@ -791,6 +826,16 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             elif driver_code:
                 tool_name = "analyze_qualifying_runs"
             _f1_trace(log, f"Qualifying keyword override -> tool={tool_name!r}")
+        elif _is_stint_query(query, session_type):
+            if str(session_type or "").strip().upper() in {"Q", "SQ"}:
+                tool_name = "analyze_driver_stints" if driver_code else "compare_driver_stints" if driver_code1 and driver_code2 else tool_name
+                _f1_trace(log, f"Stint keyword detected in qualifying context -> tool={tool_name!r} (will error cleanly)")
+            elif driver_code1 and driver_code2:
+                tool_name = "compare_driver_stints"
+                _f1_trace(log, "Stint keyword override -> compare_driver_stints")
+            elif driver_code:
+                tool_name = "analyze_driver_stints"
+                _f1_trace(log, "Stint keyword override -> analyze_driver_stints")
         elif str(session_type or "").strip().upper() in {"Q", "SQ"} and tool_name == "compare_driver_lap_times":
             tool_name = "compare_qualifying_runs"
             _f1_trace(log, "Qualifying session override -> compare_qualifying_runs")
@@ -892,6 +937,31 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             plot_html = render_qualifying_runs_plot(year, race, driver_code.upper(), result)
             prose_html = render_qualifying_runs_prose(result)
             return f"<h2>{heading}</h2>{plot_html}{prose_html}{render_qualifying_runs_sections(result)}"
+        elif tool_name == "analyze_driver_stints":
+            if not race:
+                _f1_trace(log, "(validation) analyze_driver_stints missing race")
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code:
+                _f1_trace(log, "(validation) analyze_driver_stints missing driver_code")
+                return "<p>Error: Driver code required. Please specify which driver (e.g., VER, NOR, HAM).</p>"
+            _f1_trace(
+                log,
+                f"Tool call: analyze_driver_stints({year!r}, {race!r}, {driver_code.upper()!r}, session_type={session_type!r})",
+            )
+            result = analyze_driver_stints(year, race, driver_code.upper(), session_type=session_type)
+            if "error" in result:
+                _f1_trace(log, f"analyze_driver_stints error: {result.get('error', 'Unknown error')}")
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+            normalized_session_type = result.get("session_type", session_type)
+            heading = format_session_heading(
+                f"Stint analysis - {driver_code.upper()}",
+                year=year,
+                race=race,
+                session_type=normalized_session_type,
+            )
+            _f1_trace(log, f"analyze_driver_stints OK ({len(result.get('stints', []))} stints)")
+            plot_html = render_driver_stints_plot(year, race, driver_code.upper(), result.get("stints", []))
+            return f"<h2>{heading}</h2>{plot_html}{render_driver_stint_analysis(result)}"
         elif tool_name == "plot_driver_lap_times":
             if not race:
                 _f1_trace(log, "(validation) plot_driver_lap_times missing race")
@@ -956,6 +1026,60 @@ def _f1_mcp_res_run(query: str, log: list[str], *, use_local: bool) -> str:
             plot_html = render_qualifying_comparison_plot(year, race, result)
             prose_html = render_qualifying_comparison_prose(result)
             return f"<h2>{heading}</h2>{plot_html}{prose_html}{render_qualifying_comparison_sections(result)}"
+        elif tool_name == "compare_driver_stints":
+            if not race:
+                _f1_trace(log, "(validation) compare_driver_stints missing race")
+                return "<p>Error: Race name required. Please specify which race you're asking about.</p>"
+            if not driver_code1 or not driver_code2:
+                _f1_trace(log, "(validation) compare_driver_stints missing driver pair")
+                return "<p>Error: Two driver codes required. Please specify both drivers (e.g., HAM and VER).</p>"
+            _f1_trace(
+                log,
+                f"Tool call: compare_driver_stints({year!r}, {race!r}, {driver_code1.upper()!r}, {driver_code2.upper()!r}, session_type={session_type!r})",
+            )
+            result = compare_driver_stints(
+                year,
+                race,
+                driver_code1.upper(),
+                driver_code2.upper(),
+                session_type=session_type,
+            )
+            if "error" in result:
+                _f1_trace(log, f"compare_driver_stints error: {result.get('error', 'Unknown error')}")
+                return f"<p>Error: {result.get('error', 'Unknown error')}</p>"
+            normalized_session_type = result.get("session_type", session_type)
+            heading = format_session_heading(
+                f"Stint comparison - {driver_code1.upper()} vs {driver_code2.upper()}",
+                year=year,
+                race=race,
+                session_type=normalized_session_type,
+            )
+            analysis_prompt = build_stint_comparison_analysis_prompt(
+                year,
+                race,
+                driver_code1.upper(),
+                driver_code2.upper(),
+                result,
+                query,
+            )
+            try:
+                analysis_text = _f1_generate_llm_text(
+                    use_local=use_local,
+                    client=client,
+                    prompt=analysis_prompt,
+                    log=log,
+                    purpose="stint comparison analysis",
+                    context_label="F1 MCP Stint Analysis",
+                    json_only=False,
+                )
+                analysis_section = render_comparison_analysis_section(analysis_text)
+                _f1_trace(log, f"Stint analysis LLM OK ({len(analysis_text)} chars)")
+            except Exception as e:
+                analysis_section = f"<div class='mt-8'><p class='text-red-400'>Error generating analysis: {str(e)}</p></div>"
+                _f1_trace(log, f"Stint analysis LLM failed: {e}")
+            _f1_trace(log, f"compare_driver_stints OK ({len(result.get('comparison', {}).get('stint_matchups', []))} matchups)")
+            plot_html = render_stint_comparison_plot(year, race, result)
+            return f"<h2>{heading}</h2>{plot_html}{render_stint_comparison(result)}{analysis_section}"
         elif tool_name == "compare_driver_lap_times":
             if not race:
                 _f1_trace(log, "(validation) compare_driver_lap_times missing race")
